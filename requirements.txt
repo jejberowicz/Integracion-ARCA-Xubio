@@ -1,0 +1,21 @@
+# Base de datos
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# Configuración
+python-dotenv==1.0.1
+
+# AFIP / ARCA
+zeep==4.3.1
+cryptography==44.0.0
+requests==2.32.3
+
+# Mis Comprobantes (scraping asistido)
+playwright==1.49.0
+
+# CLI
+click==8.1.7
+
+# Tests
+pytest==8.3.4

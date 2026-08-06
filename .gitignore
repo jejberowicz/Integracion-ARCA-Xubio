@@ -1,0 +1,20 @@
+# Seguridad y Certificados
+*.key
+*.csr
+*.crt
+*.pem
+.env
+.certs/
+
+# Datos locales
+data/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
