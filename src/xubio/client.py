@@ -80,7 +80,14 @@ class XubioClient:
                 f"Xubio rechazó las credenciales de {self.cliente.cuit} "
                 f"(HTTP {respuesta.status_code}): {respuesta.text[:300]}"
             )
-        datos = respuesta.json()
+        try:
+            datos = respuesta.json()
+        except ValueError as exc:
+            raise ErrorAutenticacionXubio(
+                "Xubio respondió algo que no es JSON al pedir el token. "
+                f"Revisá XUBIO_TOKEN_URL ({config.XUBIO_TOKEN_URL}). "
+                f"Respuesta: {respuesta.text[:200]!r}"
+            ) from exc
         token = datos.get("access_token")
         if not token:
             raise ErrorAutenticacionXubio(f"Respuesta de token inesperada: {datos}")

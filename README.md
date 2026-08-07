@@ -191,6 +191,25 @@ python scripts/generar_csr.py .certs/clientes.xlsx
 # 3. Dar de alta todos
 python main.py alta-masiva .certs/clientes.xlsx --dry-run
 python main.py alta-masiva .certs/clientes.xlsx
+
+# 4. Completar datos que se averiguan después (IDs de producto, credenciales):
+#    agregar las columnas a la misma planilla y volver a correr
+python main.py alta-masiva .certs/clientes.xlsx --actualizar --dry-run
+python main.py alta-masiva .certs/clientes.xlsx --actualizar
+```
+
+`--actualizar` aplica solo las celdas **no vacías**: la planilla completa datos,
+nunca los borra. Es idempotente, así que se puede correr las veces que haga
+falta a medida que vas consiguiendo credenciales. Sin `--actualizar`, los
+clientes que ya existen se saltean.
+
+El `producto_xubio_id` no se puede saber antes de tener las credenciales
+cargadas, así que el orden natural es: alta con lo que tengas, después
+`probar-xubio --listar productos`, y después `--actualizar`. Para consultar los
+maestros sin haber dado de alta nada todavía:
+
+```bash
+python main.py probar-xubio --client-id XXX --secret YYY --listar productos
 ```
 
 Los archivos se nombran por CUIT (`30712345671.key` / `.crt`), así el alta

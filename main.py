@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import sys
+from typing import Any
 
 import click
 
@@ -42,6 +43,132 @@ def _cuit_opcion(valor: str) -> str:
 
 def _buscar_cliente(session, cuit: str) -> Cliente | None:
     return session.query(Cliente).filter_by(cuit=normalizar_cuit(cuit)).first()
+
+
+# Campos de la planilla que se pueden actualizar sobre un cliente existente.
+# Los secretos se cifran; el producto va adentro del JSON de configuración.
+_CAMPOS_ACTUALIZABLES = (
+    ("razon_social", "razon_social", None),
+    ("fuente", "fuente_ventas", None),
+    ("ambiente", "ambiente", None),
+    ("key_path", "key_path", None),
+    ("crt_path", "crt_path", None),
+    ("clave_fiscal_usuario", "clave_fiscal_usuario", None),
+    ("clave_fiscal_password", "clave_fiscal_password", crypto.cifrar),
+    ("xubio_client_id", "xubio_client_id", None),
+    ("xubio_secret", "xubio_secret_id", crypto.cifrar),
+)
+
+
+def _aplicar(session, operacion):
+    """Corre la operación en un savepoint.
+
+    Una fila con datos incoherentes no puede tirar abajo el resto del lote, así
+    que cada una se confirma por separado. Devuelve el resultado, o el mensaje
+    de error si la base la rechazó.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        with session.begin_nested():
+            return operacion()
+    except IntegrityError as exc:
+        return f"la base rechazó el cambio ({_causa(exc)})"
+
+
+def _causa(exc: Exception) -> str:
+    texto = str(getattr(exc, "orig", exc))
+    return texto.split("\n")[0][:160]
+
+
+def _validar_coherencia(cliente: Cliente | None, registro: dict, fuente: str) -> str | None:
+    """Chequea que la fuente resultante tenga sus credenciales.
+
+    Mira el estado que quedaría combinando lo que ya está cargado con lo que
+    trae la planilla, así una actualización parcial no rompe un cliente válido.
+    La base tiene el mismo CHECK, pero acá el mensaje es entendible.
+    """
+    def efectivo(columna: str, atributo: str) -> Any:
+        return registro.get(columna) or (getattr(cliente, atributo, None) if cliente else None)
+
+    if fuente == FuenteVentas.WSFE:
+        # key_path/crt_path se deducen del CUIT si no vienen, así que siempre hay.
+        return None
+
+    if not efectivo("clave_fiscal_password", "clave_fiscal_password"):
+        return (
+            "la fuente 'mis_comprobantes' necesita clave_fiscal_password "
+            "(no está en la planilla ni cargada)"
+        )
+    return None
+
+
+def _completar_defaults(cliente: Cliente, fuente: str, dry_run: bool) -> list[str]:
+    """Rellena lo que cada fuente da por sentado.
+
+    Son los mismos defaults que aplica el alta: las rutas de certificados salen
+    del CUIT y el usuario de Clave Fiscal es el CUIT. Sin esto, cambiar la
+    fuente de un cliente ya cargado choca contra el CHECK de la base.
+    """
+    cambios = []
+    if fuente == FuenteVentas.WSFE:
+        faltantes = [
+            (a, f"{cliente.cuit}{s}")
+            for a, s in (("key_path", ".key"), ("crt_path", ".crt"))
+            if not getattr(cliente, a)
+        ]
+    else:
+        faltantes = [
+            ("clave_fiscal_usuario", cliente.cuit)
+        ] if not cliente.clave_fiscal_usuario else []
+
+    for atributo, valor in faltantes:
+        cambios.append(atributo)
+        if not dry_run:
+            setattr(cliente, atributo, valor)
+    return cambios
+
+
+def _actualizar_cliente(
+    cliente: Cliente, registro: dict, fuente: str, dry_run: bool
+) -> list[str]:
+    """Aplica los valores no vacíos de la planilla. Devuelve los campos tocados.
+
+    Las celdas vacías no borran lo que ya está cargado: la planilla completa
+    datos, no los pisa con nada.
+    """
+    cambios = []
+
+    for columna, atributo, transformar in _CAMPOS_ACTUALIZABLES:
+        valor = registro.get(columna)
+        if valor in (None, ""):
+            continue
+        valor = str(valor).strip()
+        # Los secretos se comparan descifrados: si no, cada corrida los
+        # reescribiría y reportaría un cambio que no existe.
+        actual = getattr(cliente, atributo)
+        if transformar is not None and actual:
+            try:
+                actual = crypto.descifrar(actual)
+            except crypto.ClaveNoConfigurada:
+                actual = None  # cifrado con otra clave: conviene reescribirlo
+        if actual == valor:
+            continue
+        cambios.append(columna)
+        if not dry_run:
+            setattr(cliente, atributo, transformar(valor) if transformar else valor)
+
+    producto = registro.get("producto_xubio_id")
+    if producto not in (None, ""):
+        conf = dict(cliente.config_xubio or {})
+        if str(conf.get("producto_default_id")) != str(producto):
+            cambios.append("producto_xubio_id")
+            if not dry_run:
+                conf["producto_default_id"] = str(producto)
+                cliente.config_xubio = conf
+
+    cambios += _completar_defaults(cliente, fuente, dry_run)
+    return cambios
 
 
 @click.group()
@@ -132,12 +259,19 @@ def alta_cliente(
 @click.argument("planilla", type=click.Path(exists=True, dir_okay=False))
 @click.option("--dry-run", is_flag=True, help="Mostrar qué haría, sin escribir.")
 @click.option(
+    "--actualizar",
+    is_flag=True,
+    help="Actualizar los clientes que ya existan con los datos no vacíos de la planilla.",
+)
+@click.option(
     "--fuente-por-defecto",
     type=click.Choice(FuenteVentas.TODAS),
     default=FuenteVentas.WSFE,
     help="Fuente para las filas que no traigan la columna 'fuente'.",
 )
-def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
+def alta_masiva(
+    planilla: str, dry_run: bool, actualizar: bool, fuente_por_defecto: str
+) -> None:
     """Da de alta varios clientes desde un .xlsx o .csv.
 
     Columnas mínimas: RAZON SOCIAL y CUIT. Opcionales: fuente, ambiente,
@@ -153,7 +287,7 @@ def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
     if not registros:
         raise click.ClickException("La planilla no tiene filas con razón social y CUIT.")
 
-    altas, omitidos, errores = 0, 0, []
+    altas, omitidos, actualizados, errores = 0, 0, 0, []
 
     with get_session() as session:
         for registro in registros:
@@ -163,13 +297,38 @@ def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
             if not cuit_valido(cuit):
                 errores.append(f"{razon}: CUIT inválido ({registro['cuit']})")
                 continue
-            if _buscar_cliente(session, cuit):
-                omitidos += 1
-                continue
 
-            fuente = (registro.get("fuente") or fuente_por_defecto).strip().lower()
+            existente = _buscar_cliente(session, cuit)
+
+            fuente = (
+                registro.get("fuente")
+                or (existente.fuente_ventas if existente else None)
+                or fuente_por_defecto
+            ).strip().lower()
             if fuente not in FuenteVentas.TODAS:
                 errores.append(f"{razon}: fuente desconocida {fuente!r}")
+                continue
+
+            problema = _validar_coherencia(existente, registro, fuente)
+            if problema:
+                errores.append(f"{razon}: {problema}")
+                continue
+
+            if existente:
+                if not actualizar:
+                    omitidos += 1
+                    continue
+                cambios = _aplicar(
+                    session, lambda: _actualizar_cliente(existente, registro, fuente, dry_run)
+                )
+                if isinstance(cambios, str):
+                    errores.append(f"{razon}: {cambios}")
+                elif cambios:
+                    actualizados += 1
+                    click.echo(
+                        f"  {'[dry-run] ' if dry_run else ''}{formatear_cuit(cuit)}  "
+                        f"{razon[:38]:<38} actualiza: {', '.join(cambios)}"
+                    )
                 continue
 
             if fuente == FuenteVentas.WSFE:
@@ -177,9 +336,6 @@ def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
                 crt_path = registro.get("crt_path") or f"{cuit}.crt"
             else:
                 key_path = crt_path = None
-                if not registro.get("clave_fiscal_password"):
-                    errores.append(f"{razon}: fuente mis_comprobantes sin clave fiscal")
-                    continue
 
             producto = registro.get("producto_xubio_id")
             click.echo(
@@ -216,10 +372,14 @@ def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
         if dry_run:
             session.rollback()
 
-    click.echo(
+    resumen = (
         f"\n{'Se darían de alta' if dry_run else 'Dados de alta'}: {altas}. "
-        f"Ya existían: {omitidos}. Con problemas: {len(errores)}."
+        f"Actualizados: {actualizados}. "
+        f"Sin cambios: {omitidos}. Con problemas: {len(errores)}."
     )
+    click.echo(resumen)
+    if omitidos and not actualizar:
+        click.echo("Usá --actualizar para completar los datos de los que ya existen.")
     for e in errores:
         click.echo(f"  !! {e}")
 
@@ -365,21 +525,44 @@ def probar_afip(cuit: str) -> None:
 
 
 @cli.command("probar-xubio")
-@click.option("--cuit", required=True)
+@click.option("--cuit", help="Cliente ya cargado en la base.")
+@click.option("--client-id", help="Probar credenciales sueltas, sin dar de alta el cliente.")
+@click.option("--secret", help="Secret que acompaña a --client-id.")
 @click.option("--listar", type=click.Choice(["productos", "clientes"]), help="Muestra maestros.")
-def probar_xubio(cuit: str, listar: str | None) -> None:
+def probar_xubio(
+    cuit: str | None, client_id: str | None, secret: str | None, listar: str | None
+) -> None:
     """Verifica las credenciales de Xubio y ayuda a encontrar los IDs de maestros.
 
     Con --listar productos se obtiene el ID que va en --producto-xubio-id.
+
+    Acepta --client-id/--secret sueltos para consultar los maestros antes de
+    tener el cliente cargado, que es el orden natural cuando todavía no se sabe
+    qué producto usar.
     """
     import json
 
     from src.xubio.client import RUTA_CLIENTES, RUTA_PRODUCTOS, XubioClient
 
+    if not cuit and not (client_id and secret):
+        raise click.ClickException(
+            "Indicá --cuit de un cliente cargado, o --client-id y --secret."
+        )
+
     with get_session() as session:
-        cliente = _buscar_cliente(session, cuit)
-        if cliente is None:
-            raise click.ClickException(f"No existe el cliente {cuit}")
+        if client_id:
+            # Cliente en memoria, no se guarda: solo sirve para esta consulta.
+            cliente = Cliente(
+                cuit=normalizar_cuit(cuit) if cuit else "0",
+                razon_social="(credenciales sueltas)",
+                xubio_client_id=client_id,
+                xubio_secret_id=crypto.cifrar(secret),
+                config_xubio={},
+            )
+        else:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                raise click.ClickException(f"No existe el cliente {cuit}")
 
         xubio = XubioClient(cliente)
         try:
