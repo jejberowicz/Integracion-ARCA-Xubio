@@ -1,7 +1,7 @@
 """La planilla completa datos sobre clientes ya cargados sin pisar lo que hay."""
 import pytest
 
-from main import _actualizar_cliente, _validar_coherencia
+from main import _actualizar_cliente, _detectar_corrupcion_excel, _validar_coherencia
 from src.database.models import Cliente, FuenteVentas
 from src.security import crypto
 
@@ -116,3 +116,35 @@ def test_coherencia_acepta_si_la_clave_ya_estaba_cargada():
 
 def test_coherencia_wsfe_siempre_pasa():
     assert _validar_coherencia(None, {}, "wsfe") is None
+
+
+# --- Corrupción de identificadores largos por Excel ---
+
+
+@pytest.mark.parametrize(
+    "valor",
+    ["5,51249281159823E+98", "5.51249281159823E+98", "1E+15", "-2,5e-3"],
+)
+def test_detecta_notacion_cientifica(valor):
+    problema = _detectar_corrupcion_excel({"xubio_client_id": valor})
+    assert problema and "Excel" in problema
+
+
+@pytest.mark.parametrize(
+    "valor",
+    [
+        # El client_id real: 99 dígitos, intacto.
+        "5512498477298239634139608489261886125696986490506726439001659622508524670159847725512417400899284",
+        "101",
+        "abc123",
+        "J*RgDcx49g_oym5+V6Ef1aKrls",
+        None,
+    ],
+)
+def test_no_marca_valores_sanos(valor):
+    assert _detectar_corrupcion_excel({"xubio_client_id": valor}) is None
+
+
+def test_revisa_todas_las_columnas_sensibles():
+    assert _detectar_corrupcion_excel({"xubio_secret": "1,23E+20"})
+    assert _detectar_corrupcion_excel({"producto_xubio_id": "1,23E+20"})

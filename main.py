@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import sys
 from typing import Any
 
@@ -79,6 +80,29 @@ def _aplicar(session, operacion):
 def _causa(exc: Exception) -> str:
     texto = str(getattr(exc, "orig", exc))
     return texto.split("\n")[0][:160]
+
+
+# Excel convierte los identificadores largos a número y los guarda en notación
+# científica, perdiendo todos los dígitos menos los primeros quince. El valor
+# es irrecuperable, así que hay que frenarlo antes de que entre a la base.
+_NOTACION_CIENTIFICA = re.compile(r"^-?\d+([.,]\d+)?[Ee][+-]?\d+$")
+
+_COLUMNAS_SENSIBLES = ("xubio_client_id", "xubio_secret", "producto_xubio_id")
+
+
+def _detectar_corrupcion_excel(registro: dict) -> str | None:
+    for columna in _COLUMNAS_SENSIBLES:
+        valor = registro.get(columna)
+        if valor is None:
+            continue
+        if _NOTACION_CIENTIFICA.match(str(valor).strip()):
+            return (
+                f"la columna '{columna}' tiene {str(valor).strip()!r}, que es lo que "
+                "queda cuando Excel convierte un identificador largo a número. "
+                "El valor original se perdió: copialo de nuevo desde Xubio con la "
+                "columna formateada como Texto."
+            )
+    return None
 
 
 def _validar_coherencia(cliente: Cliente | None, registro: dict, fuente: str) -> str | None:
@@ -309,7 +333,9 @@ def alta_masiva(
                 errores.append(f"{razon}: fuente desconocida {fuente!r}")
                 continue
 
-            problema = _validar_coherencia(existente, registro, fuente)
+            problema = _detectar_corrupcion_excel(registro) or _validar_coherencia(
+                existente, registro, fuente
+            )
             if problema:
                 errores.append(f"{razon}: {problema}")
                 continue

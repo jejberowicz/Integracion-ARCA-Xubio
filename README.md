@@ -243,3 +243,15 @@ python main.py ver-config --cuit 30701234568
 
 Las alícuotas que no estén mapeadas caen en `producto_default_id`. Si el cliente
 factura todo al 21 %, alcanza con ese default y no hace falta mapear nada.
+
+### Cuidado con Excel y los identificadores largos
+
+El `client_id` de Xubio tiene ~99 dígitos. Si la celda no está formateada como
+**Texto**, Excel lo interpreta como número y lo guarda en notación científica
+(`5,51249281159823E+98`), perdiendo todo menos los primeros quince dígitos. El
+valor original no se puede recuperar.
+
+Antes de pegar credenciales: seleccionar la columna → Formato de celdas →
+**Texto**. `alta-masiva` detecta el patrón y rechaza la fila en vez de guardar
+una credencial rota que después falla con un error de autenticación difícil de
+rastrear.
