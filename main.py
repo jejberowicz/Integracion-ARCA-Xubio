@@ -12,6 +12,7 @@ from src.database.connection import crear_tablas, get_session
 from src.database.models import Ambiente, Cliente, Comprobante, EstadoSync, FuenteVentas
 from src.security import crypto
 from src.sync import clientes_activos, rango_por_defecto, sincronizar_cliente
+from src.utils.helpers import cuit_valido, formatear_cuit, normalizar_cuit
 
 
 def _configurar_logging(verbose: bool) -> None:
@@ -22,6 +23,25 @@ def _configurar_logging(verbose: bool) -> None:
     )
     logging.getLogger("zeep").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+def _cuit_opcion(valor: str) -> str:
+    """Normaliza y valida un CUIT recibido por parámetro.
+
+    Se acepta escrito como venga (con guiones, puntos o espacios) pero se guarda
+    y se busca siempre en 11 dígitos.
+    """
+    cuit = normalizar_cuit(valor)
+    if not cuit_valido(cuit):
+        raise click.ClickException(
+            f"El CUIT {valor!r} no es válido: no verifica el dígito verificador. "
+            "Revisá que no falte o sobre un número."
+        )
+    return cuit
+
+
+def _buscar_cliente(session, cuit: str) -> Cliente | None:
+    return session.query(Cliente).filter_by(cuit=normalizar_cuit(cuit)).first()
 
 
 @click.group()
@@ -77,11 +97,15 @@ def alta_cliente(
     producto_xubio_id: str | None,
 ) -> None:
     """Da de alta una empresa a sincronizar."""
-    cuit = cuit.replace("-", "").strip()
+    cuit = _cuit_opcion(cuit)
 
     with get_session() as session:
-        if session.query(Cliente).filter_by(cuit=cuit).first():
-            raise click.ClickException(f"Ya existe un cliente con CUIT {cuit}")
+        existente = session.query(Cliente).filter_by(cuit=cuit).first()
+        if existente:
+            raise click.ClickException(
+                f"Ya existe un cliente con CUIT {formatear_cuit(cuit)}: "
+                f"{existente.razon_social}"
+            )
 
         cliente = Cliente(
             cuit=cuit,
@@ -98,7 +122,10 @@ def alta_cliente(
         )
         session.add(cliente)
 
-    click.echo(f"Cliente {razon_social} ({cuit}) dado de alta con fuente '{fuente}'.")
+    click.echo(
+        f"Cliente {razon_social} ({formatear_cuit(cuit)}) dado de alta "
+        f"con fuente '{fuente}'."
+    )
 
 
 @cli.command("listar-clientes")
@@ -137,7 +164,7 @@ def sync(
 
     resultados = []
     with get_session() as session:
-        objetivo = clientes_activos(session, cuit)
+        objetivo = clientes_activos(session, normalizar_cuit(cuit) if cuit else None)
         if not objetivo:
             raise click.ClickException(
                 f"No hay clientes activos{f' con CUIT {cuit}' if cuit else ''}."
@@ -175,7 +202,7 @@ def importar_csv(cuit: str, archivo: str) -> None:
     from src.sync import Resultado, _persistir
 
     with get_session() as session:
-        cliente = session.query(Cliente).filter_by(cuit=cuit.replace("-", "")).first()
+        cliente = _buscar_cliente(session, cuit)
         if cliente is None:
             raise click.ClickException(f"No existe el cliente {cuit}")
 
@@ -199,7 +226,7 @@ def probar_afip(cuit: str) -> None:
     from src.afip.wsfe import ComprobantesEnLinea
 
     with get_session() as session:
-        cliente = session.query(Cliente).filter_by(cuit=cuit.replace("-", "")).first()
+        cliente = _buscar_cliente(session, cuit)
         if cliente is None:
             raise click.ClickException(f"No existe el cliente {cuit}")
 
@@ -247,7 +274,7 @@ def probar_xubio(cuit: str, listar: str | None) -> None:
     from src.xubio.client import RUTA_CLIENTES, RUTA_PRODUCTOS, XubioClient
 
     with get_session() as session:
-        cliente = session.query(Cliente).filter_by(cuit=cuit.replace("-", "")).first()
+        cliente = _buscar_cliente(session, cuit)
         if cliente is None:
             raise click.ClickException(f"No existe el cliente {cuit}")
 
@@ -280,7 +307,7 @@ def ver_pendientes(cuit: str | None) -> None:
             Comprobante.estado_sync.in_((EstadoSync.PENDIENTE, EstadoSync.ERROR))
         )
         if cuit:
-            consulta = consulta.join(Cliente).filter(Cliente.cuit == cuit.replace("-", ""))
+            consulta = consulta.join(Cliente).filter(Cliente.cuit == normalizar_cuit(cuit))
 
         filas = consulta.order_by(Comprobante.fecha).limit(200).all()
         if not filas:

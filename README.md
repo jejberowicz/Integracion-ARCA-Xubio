@@ -40,7 +40,7 @@ python scripts/migrar_sqlite.py data/empresa_contable.db
 1. Generar la clave y el pedido de certificado (CSR) con el CUIT del cliente:
    ```bash
    openssl genrsa -out .certs/acme.key 2048
-   openssl req -new -key .certs/acme.key -subj "/C=AR/O=ACME SA/CN=carga-datos/serialNumber=CUIT 30712345678" -out .certs/acme.csr
+   openssl req -new -key .certs/acme.key -subj "/C=AR/O=ACME SA/CN=carga-datos/serialNumber=CUIT 30712345671" -out .certs/acme.csr
    ```
 2. En ARCA con Clave Fiscal: *Administración de Certificados Digitales* → subir
    el `.csr` → descargar el `.crt` a `.certs/`.
@@ -64,15 +64,15 @@ empresa, por eso se guardan por cliente y no en el `.env`.
 ```bash
 # Cliente con facturación electrónica propia
 python main.py alta-cliente \
-  --cuit 30-71234567-8 --razon-social "ACME SA" \
+  --cuit 30-71234567-1 --razon-social "ACME SA" \
   --fuente wsfe --key-path acme.key --crt-path acme.crt \
   --xubio-client-id XXX --xubio-secret YYY --producto-xubio-id 123
 
 # Cliente con controlador fiscal
 python main.py alta-cliente \
-  --cuit 27-12345678-4 --razon-social "Kiosco Don José" \
+  --cuit 27-12345678-0 --razon-social "Kiosco Don José" \
   --fuente mis_comprobantes \
-  --clave-fiscal-usuario 27123456784 --clave-fiscal-password '...' \
+  --clave-fiscal-usuario 27123456780 --clave-fiscal-password '...' \
   --xubio-client-id ZZZ --xubio-secret WWW --producto-xubio-id 456
 ```
 
@@ -87,9 +87,9 @@ Comprobantes devuelven el detalle de líneas. El ID se averigua con
 ## Verificar antes de sincronizar
 
 ```bash
-python main.py probar-afip  --cuit 30712345678   # WSAA + puntos de venta
-python main.py probar-xubio --cuit 30712345678   # autenticación
-python main.py probar-xubio --cuit 30712345678 --listar productos
+python main.py probar-afip  --cuit 30712345671   # WSAA + puntos de venta
+python main.py probar-xubio --cuit 30712345671   # autenticación
+python main.py probar-xubio --cuit 30712345671 --listar productos
 ```
 
 `probar-afip` autentica contra WSAA y lista los puntos de venta habilitados sin
@@ -100,7 +100,7 @@ asociado al servicio de Facturación Electrónica.
 
 ```bash
 python main.py sync                                  # todos los clientes activos
-python main.py sync --cuit 30712345678               # uno solo
+python main.py sync --cuit 30712345671               # uno solo
 python main.py sync --desde 2026-03-01 --hasta 2026-03-31
 python main.py sync --solo-descargar                 # bajar de ARCA sin subir
 python main.py sync --solo-subir                     # reintentar lo que falló
@@ -126,7 +126,7 @@ data/descargas/<CUIT>/ventas_<AAAAMMDD>_<AAAAMMDD>.csv
 La corrida siguiente lo levanta solo. También se puede importar directo:
 
 ```bash
-python main.py importar-csv --cuit 27123456784 ventas_marzo.csv
+python main.py importar-csv --cuit 27123456780 ventas_marzo.csv
 ```
 
 ## Estructura
