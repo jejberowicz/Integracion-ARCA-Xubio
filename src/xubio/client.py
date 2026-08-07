@@ -204,6 +204,7 @@ class XubioClient:
             cliente_xubio_id=cliente_xubio_id,
             producto_id=conf.get("producto_default_id"),
             punto_venta_id=punto_venta_id,
+            productos_por_alicuota=conf.get("producto_por_alicuota"),
         )
 
         log.debug("POST %s payload=%s", RUTA_COMPROBANTE_VENTA, payload)

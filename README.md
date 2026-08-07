@@ -198,3 +198,29 @@ deduce las rutas sola y no hay que cargarlas en la planilla.
 
 `generar_csr.py` nunca pisa una clave existente: si ya hay un certificado
 emitido contra ella, regenerarla lo invalidaría.
+
+## Productos de Xubio por alícuota
+
+En Xubio la tasa de IVA es un atributo del producto, así que un producto
+"Servicio al 21%" no sirve para una línea al 10,5 % ni para una exenta. Hay que
+crear un producto por cada alícuota que el cliente facture:
+
+| Producto en Xubio | Tasa IVA | Para |
+|---|---|---|
+| Servicio al 21% | 21 % | la mayoría de las ventas |
+| Servicio al 10,5% | 10,5 % | alícuota reducida |
+| Servicio exento / no gravado | 0 % | exentos y no gravados |
+
+El ID interno (numérico) no es el Código/SKU: se obtiene con
+`probar-xubio --listar productos`. Después:
+
+```bash
+python main.py mapear-producto --cuit 30701234568 --alicuota 21   --producto-id 101
+python main.py mapear-producto --cuit 30701234568 --alicuota 10.5 --producto-id 102
+python main.py mapear-producto --cuit 30701234568 --alicuota 0    --producto-id 103
+
+python main.py ver-config --cuit 30701234568
+```
+
+Las alícuotas que no estén mapeadas caen en `producto_default_id`. Si el cliente
+factura todo al 21 %, alcanza con ese default y no hace falta mapear nada.

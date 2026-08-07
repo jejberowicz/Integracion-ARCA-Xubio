@@ -401,6 +401,57 @@ def probar_xubio(cuit: str, listar: str | None) -> None:
             click.echo(json.dumps(datos, ensure_ascii=False, indent=2)[:4000])
 
 
+@cli.command("mapear-producto")
+@click.option("--cuit", required=True)
+@click.option(
+    "--alicuota",
+    required=True,
+    help="Porcentaje de IVA ('21', '10.5', '0') o Id de AFIP ('5', '4', '3').",
+)
+@click.option("--producto-id", required=True, help="ID interno del producto en Xubio.")
+def mapear_producto(cuit: str, alicuota: str, producto_id: str) -> None:
+    """Asocia un producto de Xubio a una alícuota de IVA.
+
+    En Xubio la tasa de IVA es un atributo del producto, así que un producto
+    "Servicio al 21%" no sirve para las líneas al 10,5 % ni para las exentas.
+    Hace falta uno por alícuota que el cliente facture.
+    """
+    with get_session() as session:
+        cliente = _buscar_cliente(session, cuit)
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        conf = dict(cliente.config_xubio or {})
+        mapa = dict(conf.get("producto_por_alicuota") or {})
+        mapa[alicuota.strip()] = producto_id
+        conf["producto_por_alicuota"] = mapa
+        # Reasignar entero: SQLAlchemy no detecta mutaciones dentro del JSON.
+        cliente.config_xubio = conf
+
+    click.echo(f"{cliente.razon_social}: IVA {alicuota}% -> producto {producto_id}")
+    click.echo(f"Mapeo actual: {mapa}")
+
+
+@cli.command("ver-config")
+@click.option("--cuit", required=True)
+def ver_config(cuit: str) -> None:
+    """Muestra la configuración de Xubio de un cliente."""
+    import json
+
+    with get_session() as session:
+        cliente = _buscar_cliente(session, cuit)
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        click.echo(f"{cliente.razon_social} ({formatear_cuit(cliente.cuit)})")
+        click.echo(f"  fuente   : {cliente.fuente_ventas}")
+        click.echo(f"  ambiente : {cliente.ambiente}")
+        click.echo(f"  cert     : {cliente.key_path or '-'} / {cliente.crt_path or '-'}")
+        click.echo(f"  xubio id : {cliente.xubio_client_id or '(sin cargar)'}")
+        click.echo(f"  secretos : {'cargados' if cliente.xubio_secret_id else 'faltan'}")
+        click.echo(f"  config   : {json.dumps(cliente.config_xubio or {}, indent=13)}")
+
+
 @cli.command("pendientes")
 @click.option("--cuit")
 def ver_pendientes(cuit: str | None) -> None:

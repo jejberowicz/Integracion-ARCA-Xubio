@@ -6,6 +6,7 @@ ajustarlo sea tocar un solo archivo.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from src.afip.tablas import (
     NOTAS_DE_CREDITO,
@@ -94,7 +95,61 @@ def numero_formateado(cbte: Comprobante) -> str:
     return f"{cbte.pto_vta:05d}-{cbte.nro:08d}"
 
 
-def _items_desde_alicuotas(cbte: Comprobante, producto_id) -> list[dict]:
+def resolver_producto(
+    alicuota_id: int | str,
+    producto_default,
+    productos_por_alicuota: dict | None,
+) -> Any:
+    """Elige el producto de Xubio que corresponde a una alícuota de IVA.
+
+    En Xubio la tasa de IVA es un atributo del producto, así que un producto
+    "Servicio al 21%" no sirve para una línea al 10,5 % ni para una exenta. Por
+    eso se puede mapear un producto por alícuota; el default queda como
+    fallback para las que no estén mapeadas.
+
+    Las claves se buscan por Id de AFIP ("5") y también por porcentaje ("21",
+    "10.5"), que es como uno piensa el mapeo al configurarlo.
+    """
+    if not productos_por_alicuota:
+        return producto_default
+
+    mapa = {str(k).strip(): v for k, v in productos_por_alicuota.items()}
+
+    if str(alicuota_id) in mapa:
+        return mapa[str(alicuota_id)]
+
+    try:
+        porcentaje = porcentaje_iva(int(alicuota_id))
+    except (KeyError, ValueError):
+        return producto_default
+
+    # "21" y "21.0" y "21.00" tienen que encontrar la misma entrada.
+    for clave, valor in mapa.items():
+        try:
+            if Decimal(clave) == porcentaje:
+                return valor
+        except (ArithmeticError, ValueError):
+            continue
+
+    return producto_default
+
+
+def _linea(producto_id, descripcion: str, importe: Decimal, iva: float) -> dict:
+    return {
+        "producto": {"ID": producto_id},
+        "descripcion": descripcion,
+        "cantidad": 1,
+        "precio": float(importe),
+        "iva": iva,
+        "importe": float(importe),
+    }
+
+
+def _items_desde_alicuotas(
+    cbte: Comprobante,
+    producto_id,
+    productos_por_alicuota: dict | None = None,
+) -> list[dict]:
     """Una línea por alícuota de IVA, más las de no gravado y exento.
 
     Se factura contra un producto/servicio genérico: ni AFIP ni Mis Comprobantes
@@ -104,53 +159,33 @@ def _items_desde_alicuotas(cbte: Comprobante, producto_id) -> list[dict]:
     descripcion = f"{TIPOS_COMPROBANTE.get(cbte.tipo_cbte, 'Comprobante')} {numero_formateado(cbte)}"
 
     for alicuota in cbte.alicuotas_iva or []:
-        base = Decimal(str(alicuota["base_imp"]))
+        alic_id = int(alicuota["id"])
         items.append(
-            {
-                "producto": {"ID": producto_id},
-                "descripcion": descripcion,
-                "cantidad": 1,
-                "precio": float(base),
-                "iva": float(porcentaje_iva(int(alicuota["id"]))),
-                "importe": float(base),
-            }
+            _linea(
+                resolver_producto(alic_id, producto_id, productos_por_alicuota),
+                descripcion,
+                Decimal(str(alicuota["base_imp"])),
+                float(porcentaje_iva(alic_id)),
+            )
         )
+
+    # No gravado y exento van sin IVA: se usa el producto mapeado al 0 %.
+    producto_sin_iva = resolver_producto(3, producto_id, productos_por_alicuota)
 
     if cbte.imp_tot_conc and cbte.imp_tot_conc != 0:
         items.append(
-            {
-                "producto": {"ID": producto_id},
-                "descripcion": f"{descripcion} - No gravado",
-                "cantidad": 1,
-                "precio": float(cbte.imp_tot_conc),
-                "iva": 0,
-                "importe": float(cbte.imp_tot_conc),
-            }
+            _linea(producto_sin_iva, f"{descripcion} - No gravado", cbte.imp_tot_conc, 0)
         )
 
     if cbte.imp_op_ex and cbte.imp_op_ex != 0:
         items.append(
-            {
-                "producto": {"ID": producto_id},
-                "descripcion": f"{descripcion} - Exento",
-                "cantidad": 1,
-                "precio": float(cbte.imp_op_ex),
-                "iva": 0,
-                "importe": float(cbte.imp_op_ex),
-            }
+            _linea(producto_sin_iva, f"{descripcion} - Exento", cbte.imp_op_ex, 0)
         )
 
     if not items:
         # Comprobante sin desglose utilizable: se manda el neto como una línea.
         items.append(
-            {
-                "producto": {"ID": producto_id},
-                "descripcion": descripcion,
-                "cantidad": 1,
-                "precio": float(cbte.imp_neto or cbte.imp_total),
-                "iva": 0,
-                "importe": float(cbte.imp_neto or cbte.imp_total),
-            }
+            _linea(producto_sin_iva, descripcion, cbte.imp_neto or cbte.imp_total, 0)
         )
 
     return items
@@ -161,9 +196,10 @@ def armar_payload(
     cliente_xubio_id,
     producto_id,
     punto_venta_id=None,
+    productos_por_alicuota: dict | None = None,
 ) -> dict:
     """Construye el cuerpo del ``comprobanteVentaBean`` para la API de Xubio."""
-    if producto_id is None:
+    if producto_id is None and not productos_por_alicuota:
         raise ErrorMapeo(
             "Falta 'producto_default_id' en config_xubio del cliente: Xubio exige "
             "un producto/servicio existente en cada línea del comprobante."
@@ -180,7 +216,9 @@ def armar_payload(
         "moneda": moneda_xubio(cbte.moneda),
         "cotizacion": float(cbte.cotizacion or 1),
         "importeTotal": float(cbte.imp_total),
-        "transaccionProductoItems": _items_desde_alicuotas(cbte, producto_id),
+        "transaccionProductoItems": _items_desde_alicuotas(
+            cbte, producto_id, productos_por_alicuota
+        ),
         "descripcion": (
             f"Importado de ARCA ({cbte.fuente})"
             + (f" - CAE {cbte.cae}" if cbte.cae else "")
