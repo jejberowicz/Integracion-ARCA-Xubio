@@ -128,6 +128,109 @@ def alta_cliente(
     )
 
 
+@cli.command("alta-masiva")
+@click.argument("planilla", type=click.Path(exists=True, dir_okay=False))
+@click.option("--dry-run", is_flag=True, help="Mostrar qué haría, sin escribir.")
+@click.option(
+    "--fuente-por-defecto",
+    type=click.Choice(FuenteVentas.TODAS),
+    default=FuenteVentas.WSFE,
+    help="Fuente para las filas que no traigan la columna 'fuente'.",
+)
+def alta_masiva(planilla: str, dry_run: bool, fuente_por_defecto: str) -> None:
+    """Da de alta varios clientes desde un .xlsx o .csv.
+
+    Columnas mínimas: RAZON SOCIAL y CUIT. Opcionales: fuente, ambiente,
+    key_path, crt_path, clave_fiscal_usuario, clave_fiscal_password,
+    xubio_client_id, xubio_secret, producto_xubio_id.
+
+    Si no se indican key_path/crt_path, se asumen <CUIT>.key y <CUIT>.crt, que
+    es lo que genera scripts/generar_csr.py.
+    """
+    from src.importador import leer_planilla
+
+    registros = leer_planilla(planilla)
+    if not registros:
+        raise click.ClickException("La planilla no tiene filas con razón social y CUIT.")
+
+    altas, omitidos, errores = 0, 0, []
+
+    with get_session() as session:
+        for registro in registros:
+            razon = str(registro["razon_social"])
+            cuit = normalizar_cuit(registro["cuit"])
+
+            if not cuit_valido(cuit):
+                errores.append(f"{razon}: CUIT inválido ({registro['cuit']})")
+                continue
+            if _buscar_cliente(session, cuit):
+                omitidos += 1
+                continue
+
+            fuente = (registro.get("fuente") or fuente_por_defecto).strip().lower()
+            if fuente not in FuenteVentas.TODAS:
+                errores.append(f"{razon}: fuente desconocida {fuente!r}")
+                continue
+
+            if fuente == FuenteVentas.WSFE:
+                key_path = registro.get("key_path") or f"{cuit}.key"
+                crt_path = registro.get("crt_path") or f"{cuit}.crt"
+            else:
+                key_path = crt_path = None
+                if not registro.get("clave_fiscal_password"):
+                    errores.append(f"{razon}: fuente mis_comprobantes sin clave fiscal")
+                    continue
+
+            producto = registro.get("producto_xubio_id")
+            click.echo(
+                f"  {'[dry-run] ' if dry_run else ''}{formatear_cuit(cuit)}  "
+                f"{razon[:38]:<38} {fuente}"
+            )
+
+            if dry_run:
+                altas += 1
+                continue
+
+            session.add(
+                Cliente(
+                    cuit=cuit,
+                    razon_social=razon,
+                    fuente_ventas=fuente,
+                    ambiente=(registro.get("ambiente") or config.AFIP_AMBIENTE),
+                    key_path=key_path,
+                    crt_path=crt_path,
+                    clave_fiscal_usuario=(
+                        registro.get("clave_fiscal_usuario")
+                        or (cuit if fuente == FuenteVentas.MIS_COMPROBANTES else None)
+                    ),
+                    clave_fiscal_password=crypto.cifrar(
+                        registro.get("clave_fiscal_password")
+                    ),
+                    xubio_client_id=registro.get("xubio_client_id"),
+                    xubio_secret_id=crypto.cifrar(registro.get("xubio_secret")),
+                    config_xubio={"producto_default_id": producto} if producto else {},
+                )
+            )
+            altas += 1
+
+        if dry_run:
+            session.rollback()
+
+    click.echo(
+        f"\n{'Se darían de alta' if dry_run else 'Dados de alta'}: {altas}. "
+        f"Ya existían: {omitidos}. Con problemas: {len(errores)}."
+    )
+    for e in errores:
+        click.echo(f"  !! {e}")
+
+    sin_xubio = [r for r in registros if not r.get("xubio_client_id")]
+    if sin_xubio and not errores:
+        click.echo(
+            f"\nAviso: {len(sin_xubio)} clientes quedaron sin credenciales de Xubio. "
+            "Van a fallar al subir hasta que las cargues."
+        )
+
+
 @cli.command("listar-clientes")
 def listar_clientes() -> None:
     """Muestra los clientes configurados y su última sincronización."""

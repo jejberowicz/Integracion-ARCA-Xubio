@@ -170,3 +170,31 @@ CMS del WSAA y la idempotencia. Nada de eso toca la red.
 - **Navegación dentro de Mis Comprobantes** (`descargar_csv`): el login está
   automatizado, la exportación del CSV todavía no.
 - Probar `wsfe` primero con `AFIP_AMBIENTE=homologacion`.
+
+## Alta masiva desde planilla
+
+Para varios clientes conviene una planilla (`.xlsx` o `.csv`) en vez de un
+`alta-cliente` por cada uno.
+
+Columnas mínimas: **RAZON SOCIAL** y **CUIT**. Opcionales: `fuente`, `ambiente`,
+`key_path`, `crt_path`, `clave_fiscal_usuario`, `clave_fiscal_password`,
+`xubio_client_id`, `xubio_secret`, `producto_xubio_id`. El orden, las mayúsculas
+y las tildes no importan.
+
+```bash
+# 1. Generar la clave y el CSR de cada cliente con certificado
+python scripts/generar_csr.py .certs/clientes.xlsx --dry-run
+python scripts/generar_csr.py .certs/clientes.xlsx
+
+# 2. Subir cada .csr a ARCA y bajar el .crt como <CUIT>.crt en .certs/
+
+# 3. Dar de alta todos
+python main.py alta-masiva .certs/clientes.xlsx --dry-run
+python main.py alta-masiva .certs/clientes.xlsx
+```
+
+Los archivos se nombran por CUIT (`30712345671.key` / `.crt`), así el alta
+deduce las rutas sola y no hay que cargarlas en la planilla.
+
+`generar_csr.py` nunca pisa una clave existente: si ya hay un certificado
+emitido contra ella, regenerarla lo invalidaría.
