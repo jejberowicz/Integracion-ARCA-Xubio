@@ -33,6 +33,32 @@ Si venías de la base SQLite original:
 python scripts/migrar_sqlite.py data/empresa_contable.db
 ```
 
+## De dónde salen las credenciales
+
+**AFIP, fuente `wsfe`** — por cada cliente hace falta un certificado digital:
+
+1. Generar la clave y el pedido de certificado (CSR) con el CUIT del cliente:
+   ```bash
+   openssl genrsa -out .certs/acme.key 2048
+   openssl req -new -key .certs/acme.key -subj "/C=AR/O=ACME SA/CN=carga-datos/serialNumber=CUIT 30712345678" -out .certs/acme.csr
+   ```
+2. En ARCA con Clave Fiscal: *Administración de Certificados Digitales* → subir
+   el `.csr` → descargar el `.crt` a `.certs/`.
+3. En *Administrador de Relaciones de Clave Fiscal*, asociar el certificado al
+   servicio **Facturación Electrónica (wsfe)**. Sin este paso el certificado
+   autentica pero no devuelve puntos de venta.
+4. Si trabajás como contador, el cliente tiene que **delegarte** el servicio.
+
+En homologación los certificados se sacan del portal de homologación, son
+distintos de los de producción.
+
+**AFIP, fuente `mis_comprobantes`** — solo el usuario (CUIT) y la Clave Fiscal
+del cliente. No hace falta certificado.
+
+**Xubio** — en el panel de *cada empresa*: Configuración → API/Integraciones →
+crear una aplicación. Da un `client_id` y un `secret`. Son distintos por
+empresa, por eso se guardan por cliente y no en el `.env`.
+
 ## Alta de clientes
 
 ```bash
@@ -55,7 +81,20 @@ La Clave Fiscal y el secret de Xubio se guardan cifrados con `FERNET_KEY`.
 
 `--producto-xubio-id` es obligatorio en la práctica: Xubio exige un
 producto/servicio existente en cada línea del comprobante, y ni AFIP ni Mis
-Comprobantes devuelven el detalle de líneas.
+Comprobantes devuelven el detalle de líneas. El ID se averigua con
+`probar-xubio --listar productos` (ver abajo).
+
+## Verificar antes de sincronizar
+
+```bash
+python main.py probar-afip  --cuit 30712345678   # WSAA + puntos de venta
+python main.py probar-xubio --cuit 30712345678   # autenticación
+python main.py probar-xubio --cuit 30712345678 --listar productos
+```
+
+`probar-afip` autentica contra WSAA y lista los puntos de venta habilitados sin
+descargar comprobantes: es la forma barata de saber si el certificado quedó bien
+asociado al servicio de Facturación Electrónica.
 
 ## Uso diario
 

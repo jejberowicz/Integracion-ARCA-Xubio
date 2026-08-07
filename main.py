@@ -188,6 +188,89 @@ def importar_csv(cuit: str, archivo: str) -> None:
     click.echo(resultado.resumen())
 
 
+@cli.command("probar-afip")
+@click.option("--cuit", required=True)
+def probar_afip(cuit: str) -> None:
+    """Verifica las credenciales de AFIP sin descargar nada.
+
+    Para la fuente 'wsfe' autentica contra WSAA y lista los puntos de venta.
+    """
+    from src.afip.wsaa import obtener_credenciales
+    from src.afip.wsfe import ComprobantesEnLinea
+
+    with get_session() as session:
+        cliente = session.query(Cliente).filter_by(cuit=cuit.replace("-", "")).first()
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        click.echo(f"Cliente : {cliente.razon_social}")
+        click.echo(f"Fuente  : {cliente.fuente_ventas}")
+        click.echo(f"Ambiente: {cliente.ambiente}")
+
+        if cliente.fuente_ventas != FuenteVentas.WSFE:
+            click.echo(
+                "\nEste cliente usa Mis Comprobantes: no hay certificado que probar.\n"
+                "Verificá que la Clave Fiscal esté cargada y usá 'sync' o "
+                "'importar-csv'."
+            )
+            return
+
+        try:
+            creds = obtener_credenciales(session, cliente, servicio="wsfe")
+        except Exception as exc:
+            raise click.ClickException(f"Falló la autenticación con AFIP: {exc}") from exc
+
+        click.echo(f"\nTicket de Acceso OK, válido hasta {creds.expira_en:%Y-%m-%d %H:%M} UTC")
+
+        fuente = ComprobantesEnLinea()
+        soap = fuente._cliente_soap(cliente.ambiente)
+        puntos = fuente.puntos_de_venta(soap, fuente._auth(creds))
+        if puntos:
+            click.echo(f"Puntos de venta habilitados: {', '.join(map(str, puntos))}")
+        else:
+            click.echo(
+                "Sin puntos de venta habilitados. Revisá que el certificado tenga "
+                "asociado el servicio 'Facturación Electrónica' en ARCA."
+            )
+
+
+@cli.command("probar-xubio")
+@click.option("--cuit", required=True)
+@click.option("--listar", type=click.Choice(["productos", "clientes"]), help="Muestra maestros.")
+def probar_xubio(cuit: str, listar: str | None) -> None:
+    """Verifica las credenciales de Xubio y ayuda a encontrar los IDs de maestros.
+
+    Con --listar productos se obtiene el ID que va en --producto-xubio-id.
+    """
+    import json
+
+    from src.xubio.client import RUTA_CLIENTES, RUTA_PRODUCTOS, XubioClient
+
+    with get_session() as session:
+        cliente = session.query(Cliente).filter_by(cuit=cuit.replace("-", "")).first()
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        xubio = XubioClient(cliente)
+        try:
+            xubio.autenticar()
+        except Exception as exc:
+            raise click.ClickException(f"Falló la autenticación con Xubio: {exc}") from exc
+        click.echo("Autenticación con Xubio OK")
+
+        if not listar:
+            return
+
+        ruta = RUTA_PRODUCTOS if listar == "productos" else RUTA_CLIENTES
+        datos = xubio.get(ruta)
+        if isinstance(datos, list):
+            click.echo(f"\n{len(datos)} {listar}:")
+            for item in datos[:50]:
+                click.echo(json.dumps(item, ensure_ascii=False)[:200])
+        else:
+            click.echo(json.dumps(datos, ensure_ascii=False, indent=2)[:4000])
+
+
 @cli.command("pendientes")
 @click.option("--cuit")
 def ver_pendientes(cuit: str | None) -> None:
