@@ -129,8 +129,12 @@ class XubioClient:
                 time.sleep(ESPERA_REINTENTO * intento)
                 continue
 
-            if respuesta.status_code == 401:
-                # Token vencido antes de tiempo: se fuerza la renovación.
+            # Token vencido: se fuerza la renovación y se reintenta.
+            # Un token malformado da 401, pero la documentación describe además
+            # un cuerpo {"error":"invalid_token","error_description":"token
+            # died"} sin garantizar el código de estado, así que se contemplan
+            # las dos formas.
+            if respuesta.status_code == 401 or _token_muerto(respuesta):
                 self._token = None
                 ultimo_error = ErrorAutenticacionXubio(respuesta.text[:300])
                 continue
@@ -264,6 +268,16 @@ class XubioClient:
         if xubio_id is None:
             raise ErrorXubio(f"Xubio no devolvió un ID para {cbte}: {respuesta}")
         return str(xubio_id)
+
+
+def _token_muerto(respuesta: requests.Response) -> bool:
+    """Detecta el ``invalid_token`` que Xubio devuelve cuando el token expiró."""
+    if b"invalid_token" not in respuesta.content:
+        return False
+    try:
+        return respuesta.json().get("error") == "invalid_token"
+    except ValueError:
+        return False
 
 
 def _primer_elemento(respuesta: Any) -> Any | None:
