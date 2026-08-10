@@ -250,78 +250,260 @@ class MisComprobantes(FuenteVentas):
             raw={"csv": fila},
         )
 
-    # --- Descarga automatizada ---
+
+    # --- Descarga automatizada del portal ---
 
     def _carpeta(self, cliente: Cliente) -> Path:
         carpeta = config.DOWNLOADS_PATH / cliente.cuit
         carpeta.mkdir(parents=True, exist_ok=True)
         return carpeta
 
+    def ruta_csv(self, cliente: Cliente, desde: dt.date, hasta: dt.date) -> Path:
+        return self._carpeta(cliente) / f"ventas_{desde:%Y%m%d}_{hasta:%Y%m%d}.csv"
+
     def _csv_existente(self, cliente: Cliente, desde: dt.date, hasta: dt.date) -> Path | None:
         """Reusa un CSV ya bajado para ese período (permite el flujo manual)."""
-        esperado = self._carpeta(cliente) / f"ventas_{desde:%Y%m%d}_{hasta:%Y%m%d}.csv"
+        esperado = self.ruta_csv(cliente, desde, hasta)
         return esperado if esperado.exists() else None
 
-    def descargar_csv(self, cliente: Cliente, desde: dt.date, hasta: dt.date) -> Path:
-        """Baja el CSV de ventas del portal con Playwright.
+    def descargar_csv(
+        self,
+        cliente: Cliente,
+        desde: dt.date,
+        hasta: dt.date,
+        headless: bool = True,
+        explorar: bool = False,
+    ) -> Path:
+        """Baja el CSV de ventas del portal de ARCA con Playwright.
 
-        El login con Clave Fiscal no es determinístico (captcha, 2FA), así que se
-        usa un perfil de navegador persistente por CUIT: una vez que la sesión se
-        estableció a mano, las corridas siguientes suelen entrar solas.
+        La Clave Fiscal es siempre de una **persona física**: el CUIT de la
+        empresa no sirve como usuario. Por eso ``clave_fiscal_usuario`` es el
+        CUIT de quien entra (el contador, típicamente) y la empresa se elige
+        después como representado. Un mismo usuario sirve para todos los
+        clientes que lo hayan delegado.
+
+        Con ``explorar=True`` no intenta descargar: recorre hasta Mis
+        Comprobantes y guarda capturas y el HTML de cada paso, que es la forma
+        de ajustar los selectores cuando el portal cambia.
         """
         try:
-            from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
+            from playwright.sync_api import TimeoutError as PWTimeout
+            from playwright.sync_api import sync_playwright
         except ImportError as exc:  # pragma: no cover
             raise ErrorMisComprobantes(
                 "Falta Playwright. Instalar con:\n"
                 "  pip install playwright && playwright install chromium"
             ) from exc
 
-        destino = self._carpeta(cliente) / f"ventas_{desde:%Y%m%d}_{hasta:%Y%m%d}.csv"
-        perfil = config.DOWNLOADS_PATH / ".perfiles" / cliente.cuit
-        perfil.mkdir(parents=True, exist_ok=True)
-
+        usuario = cliente.clave_fiscal_usuario
         password = crypto.descifrar(cliente.clave_fiscal_password)
+        if not (usuario and password):
+            raise ErrorMisComprobantes(
+                f"{cliente.cuit}: faltan usuario y clave fiscal. Recordá que el "
+                "usuario es el CUIT de la persona que entra al portal, no el de "
+                "la empresa."
+            )
+
+        destino = self.ruta_csv(cliente, desde, hasta)
+        # El perfil es por usuario de login, no por cliente: la sesión sirve
+        # para todas las empresas que esa persona representa.
+        perfil = config.DOWNLOADS_PATH / ".perfiles" / str(usuario)
+        perfil.mkdir(parents=True, exist_ok=True)
+        diagnostico = Diagnostico(config.DOWNLOADS_PATH / ".debug" / str(cliente.cuit))
 
         with sync_playwright() as p:
             contexto = p.chromium.launch_persistent_context(
                 user_data_dir=str(perfil),
-                headless=False,  # el login con Clave Fiscal necesita ser visible
+                headless=headless,
                 accept_downloads=True,
+                downloads_path=str(self._carpeta(cliente)),
+                viewport={"width": 1440, "height": 900},
             )
             pagina = contexto.pages[0] if contexto.pages else contexto.new_page()
+            pagina.set_default_timeout(30_000)
+
             try:
-                pagina.goto(URL_LOGIN, wait_until="domcontentloaded")
+                self._ir_al_portal(pagina, usuario, password, diagnostico)
+                self._elegir_representado(pagina, cliente, diagnostico)
+                self._abrir_mis_comprobantes(pagina, diagnostico)
 
-                # Si la sesión persistente sigue viva, el portal redirige solo.
-                if "login" in pagina.url:
-                    self._login(pagina, cliente.clave_fiscal_usuario, password)
+                if explorar:
+                    diagnostico.volcar(pagina, "mis-comprobantes")
+                    raise ExploracionTerminada(
+                        "Exploración completa. Revisá los archivos en:\n"
+                        f"  {diagnostico.carpeta}\n"
+                        "Con eso se pueden ajustar los selectores de la descarga."
+                    )
 
-                pagina.goto(URL_MIS_COMPROBANTES, wait_until="domcontentloaded")
+                return self._exportar(pagina, cliente, desde, hasta, destino, diagnostico)
 
-                raise LoginAsistidoRequerido(
-                    "El login quedó resuelto, pero la navegación dentro de Mis "
-                    "Comprobantes (elegir 'Emitidos', el rango de fechas y "
-                    "'Exportar CSV') depende del layout actual del portal y no está "
-                    "automatizada.\n"
-                    "Bajá el CSV a mano y guardalo como:\n"
-                    f"  {destino}\n"
-                    "La próxima corrida lo va a levantar automáticamente."
-                )
+            except (ExploracionTerminada, ErrorMisComprobantes):
+                raise
             except PWTimeout as exc:
+                diagnostico.volcar(pagina, "timeout")
                 raise LoginAsistidoRequerido(
-                    f"El portal no respondió a tiempo para {cliente.cuit}. "
-                    f"Bajá el CSV a mano y guardalo como: {destino}"
+                    f"El portal no respondió a tiempo. Capturas en {diagnostico.carpeta}.\n"
+                    f"Como alternativa, bajá el CSV a mano y guardalo en: {destino}"
+                ) from exc
+            except Exception as exc:
+                diagnostico.volcar(pagina, "error")
+                raise ErrorMisComprobantes(
+                    f"Falló la descarga: {exc}\nCapturas en {diagnostico.carpeta}"
                 ) from exc
             finally:
                 contexto.close()
 
-    @staticmethod
-    def _login(pagina, usuario: str, password: str) -> None:
-        """Completa el formulario de Clave Fiscal en dos pasos (CUIT y clave)."""
-        pagina.fill("#F1\\:username", usuario)
+    # --- pasos ---
+
+    def _ir_al_portal(self, pagina, usuario: str, password: str, diag: "Diagnostico") -> None:
+        pagina.goto(URL_LOGIN, wait_until="domcontentloaded")
+
+        # Con la sesión del perfil todavía viva, ARCA redirige solo al portal.
+        if "login" not in pagina.url:
+            log.info("Sesión reutilizada del perfil, no hace falta loguearse")
+            return
+
+        log.info("Ingresando con Clave Fiscal del usuario %s", usuario)
+        pagina.fill("#F1\\:username", str(usuario))
         pagina.click("#F1\\:btnSiguiente")
-        pagina.wait_for_selector("#F1\\:password", timeout=15_000)
+        pagina.wait_for_load_state("networkidle")
+
+        if pagina.query_selector("#F1\\:password") is None:
+            diag.volcar(pagina, "login-sin-password")
+            texto = pagina.inner_text("body")[:200].replace("\n", " ")
+            raise ErrorMisComprobantes(
+                f"El portal no pidió la contraseña. Respondió: {texto!r}. "
+                "Verificá que el usuario sea el CUIT de una persona física."
+            )
+
         pagina.fill("#F1\\:password", password)
         pagina.click("#F1\\:btnIngresar")
-        pagina.wait_for_load_state("networkidle", timeout=30_000)
+        pagina.wait_for_load_state("networkidle")
+
+        if "login" in pagina.url:
+            diag.volcar(pagina, "login-fallido")
+            raise LoginAsistidoRequerido(
+                "El login no se completó: puede ser la clave equivocada, un "
+                "captcha o el segundo factor.\n"
+                f"Mirá {diag.carpeta} y, si hace falta, corré con --headed para "
+                "resolverlo a mano una vez (la sesión queda guardada en el perfil)."
+            )
+        log.info("Login OK")
+
+    def _elegir_representado(self, pagina, cliente: Cliente, diag: "Diagnostico") -> None:
+        """Cambia al CUIT de la empresa si el usuario entra como persona física."""
+        if str(cliente.clave_fiscal_usuario) == cliente.cuit:
+            return  # entra directamente como el contribuyente
+
+        log.info("Seleccionando representado %s", cliente.cuit)
+        try:
+            pagina.click("#represented-selector, .representado, [id*='representado']", timeout=5000)
+            pagina.fill("input[type='search'], #buscadorRepresentado", cliente.cuit, timeout=5000)
+            pagina.keyboard.press("Enter")
+            pagina.wait_for_load_state("networkidle")
+        except Exception:
+            # El selector de representado cambia seguido; no es fatal, porque
+            # muchas veces el servicio permite elegir la empresa más adelante.
+            diag.volcar(pagina, "representado")
+            log.warning(
+                "No se pudo cambiar de representado automáticamente. "
+                "Capturas en %s", diag.carpeta
+            )
+
+    def _abrir_mis_comprobantes(self, pagina, diag: "Diagnostico") -> None:
+        log.info("Abriendo Mis Comprobantes")
+        pagina.goto(URL_MIS_COMPROBANTES, wait_until="domcontentloaded")
+        pagina.wait_for_load_state("networkidle")
+
+    def _exportar(
+        self, pagina, cliente: Cliente, desde: dt.date, hasta: dt.date,
+        destino: Path, diag: "Diagnostico",
+    ) -> Path:
+        """Filtra por 'Emitidos' y el rango de fechas, y baja el CSV."""
+        log.info("Filtrando emitidos del %s al %s", desde, hasta)
+
+        for texto in ("Emitidos", "Ventas", "Comprobantes emitidos"):
+            enlace = pagina.get_by_text(texto, exact=False).first
+            if enlace.count() > 0:
+                enlace.click()
+                pagina.wait_for_load_state("networkidle")
+                break
+
+        _completar_fecha(pagina, ("fechaEmisionDesde", "fechaDesde", "desde"), desde)
+        _completar_fecha(pagina, ("fechaEmisionHasta", "fechaHasta", "hasta"), hasta)
+
+        boton_buscar = pagina.get_by_role("button", name=re.compile("buscar", re.I)).first
+        if boton_buscar.count() > 0:
+            boton_buscar.click()
+            pagina.wait_for_load_state("networkidle")
+
+        with pagina.expect_download(timeout=120_000) as espera:
+            exportar = pagina.get_by_text(re.compile("csv", re.I)).first
+            if exportar.count() == 0:
+                diag.volcar(pagina, "sin-boton-csv")
+                raise ErrorMisComprobantes(
+                    "No se encontró el botón de exportar a CSV. "
+                    f"Capturas en {diag.carpeta}"
+                )
+            exportar.click()
+
+        espera.value.save_as(str(destino))
+        log.info("CSV guardado en %s", destino)
+        return destino
+
+
+class ExploracionTerminada(ErrorMisComprobantes):
+    """Se llegó al final del modo --explorar; no es un fallo."""
+
+
+class Diagnostico:
+    """Guarda capturas y HTML para poder ajustar los selectores."""
+
+    def __init__(self, carpeta: Path):
+        self.carpeta = carpeta
+
+    def volcar(self, pagina, etiqueta: str) -> None:
+        try:
+            self.carpeta.mkdir(parents=True, exist_ok=True)
+            marca = dt.datetime.now().strftime("%H%M%S")
+            base = self.carpeta / f"{marca}_{etiqueta}"
+            pagina.screenshot(path=f"{base}.png", full_page=True)
+            (base.with_suffix(".html")).write_text(pagina.content(), encoding="utf-8")
+            (base.with_suffix(".txt")).write_text(
+                f"URL: {pagina.url}\n\n{_inventario(pagina)}", encoding="utf-8"
+            )
+            log.info("Diagnóstico guardado en %s.*", base)
+        except Exception as exc:  # pragma: no cover - el diagnóstico no debe romper
+            log.warning("No se pudo guardar el diagnóstico: %s", exc)
+
+
+def _inventario(pagina) -> str:
+    """Lista los elementos con los que se puede interactuar en la página."""
+    lineas = []
+    for selector in ("input", "select", "button", "a"):
+        for el in pagina.query_selector_all(selector)[:80]:
+            datos = {
+                k: el.get_attribute(k)
+                for k in ("id", "name", "type", "value", "href", "class", "placeholder")
+            }
+            datos = {k: v for k, v in datos.items() if v}
+            texto = (el.inner_text() or "").strip()[:60] if selector != "input" else ""
+            if datos or texto:
+                lineas.append(f"<{selector}> {texto!r} {datos}")
+    return "\n".join(lineas)
+
+
+def _completar_fecha(pagina, nombres: tuple[str, ...], fecha: dt.date) -> None:
+    """Completa un campo de fecha probando varios nombres y formatos."""
+    for nombre in nombres:
+        for selector in (f"#{nombre}", f"[name='{nombre}']", f"[id*='{nombre}']"):
+            campo = pagina.query_selector(selector)
+            if campo is None:
+                continue
+            for formato in ("%d/%m/%Y", "%Y-%m-%d"):
+                try:
+                    campo.fill(fecha.strftime(formato))
+                    return
+                except Exception:
+                    continue
+    log.warning("No se encontró el campo de fecha %s", nombres[0])

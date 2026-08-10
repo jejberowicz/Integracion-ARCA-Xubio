@@ -482,6 +482,60 @@ def sync(
         sys.exit(1)
 
 
+@cli.command("scrapear")
+@click.option("--cuit", required=True)
+@click.option("--desde", type=click.DateTime(["%Y-%m-%d"]))
+@click.option("--hasta", type=click.DateTime(["%Y-%m-%d"]))
+@click.option("--headed", is_flag=True, help="Navegador visible (para resolver captcha o 2FA).")
+@click.option(
+    "--explorar",
+    is_flag=True,
+    help="No descarga: entra al portal y guarda capturas y HTML de cada paso.",
+)
+def scrapear(
+    cuit: str,
+    desde: dt.datetime | None,
+    hasta: dt.datetime | None,
+    headed: bool,
+    explorar: bool,
+) -> None:
+    """Baja el CSV de Mis Comprobantes del portal de ARCA.
+
+    La primera vez conviene correrlo con --headed: si el portal pide captcha o
+    segundo factor se resuelve a mano una sola vez y la sesión queda guardada
+    en el perfil del navegador para las corridas siguientes.
+    """
+    from src.afip.mis_comprobantes import ExploracionTerminada, MisComprobantes
+    from src.sync import rango_por_defecto
+
+    with get_session() as session:
+        cliente = _buscar_cliente(session, cuit)
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        d, h = rango_por_defecto(cliente)
+        desde_f = desde.date() if desde else d
+        hasta_f = hasta.date() if hasta else h
+
+        fuente = MisComprobantes()
+        click.echo(
+            f"{cliente.razon_social}: {'explorando' if explorar else 'descargando'} "
+            f"{desde_f} a {hasta_f}"
+        )
+        try:
+            ruta = fuente.descargar_csv(
+                cliente, desde_f, hasta_f, headless=not headed, explorar=explorar
+            )
+        except ExploracionTerminada as fin:
+            click.echo(f"\n{fin}")
+            return
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"\nCSV en {ruta}")
+    click.echo(f"Importalo con: main.py importar-csv --cuit {normalizar_cuit(cuit)} {ruta}")
+
+
 @cli.command("importar-csv")
 @click.option("--cuit", required=True)
 @click.argument("archivo", type=click.Path(exists=True, dir_okay=False))

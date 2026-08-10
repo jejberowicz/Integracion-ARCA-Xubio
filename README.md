@@ -136,17 +136,48 @@ Sin `--desde`, arranca desde el último sync menos un día (solape deliberado).
 Correr dos veces el mismo período **no duplica**: la clave natural
 `(cliente, tipo, punto de venta, número)` es única.
 
-## Mis Comprobantes: flujo asistido
+## Mis Comprobantes
 
-El portal no tiene API y el login con Clave Fiscal puede pedir captcha o segundo
-factor. `sync` intenta entrar con un perfil de navegador persistente por CUIT; si
-no puede, avisa con la ruta exacta donde dejar el CSV bajado a mano:
+El portal no tiene API: se automatiza con Playwright.
+
+**La Clave Fiscal es siempre de una persona física.** El CUIT de una empresa no
+sirve como usuario del portal (ARCA responde "Número de CUIL/CUIT incorrecto").
+Por eso `clave_fiscal_usuario` es el CUIT de quien entra —el contador,
+normalmente— y la empresa se elige después como representado. Un mismo usuario
+sirve para todos los clientes que lo hayan delegado, así que no hay que pedirle
+la clave a nadie.
+
+```bash
+# Primera vez: navegador visible, por si pide captcha o segundo factor.
+# La sesión queda guardada en el perfil y las corridas siguientes entran solas.
+python main.py scrapear --cuit 30712345671 --headed
+
+python main.py scrapear --cuit 30712345671 --desde 2026-07-01 --hasta 2026-07-31
+```
+
+El perfil del navegador es **por usuario de login**, no por cliente: una sesión
+sirve para todas las empresas de esa persona.
+
+### Cuando el portal cambia
+
+El layout de Mis Comprobantes cambia cada tanto y rompe los selectores. Para eso
+está el modo exploración, que entra, recorre hasta el servicio y guarda captura,
+HTML e inventario de elementos de cada paso:
+
+```bash
+python main.py scrapear --cuit 30712345671 --explorar
+```
+
+Los archivos quedan en `data/descargas/.debug/<CUIT>/`. Con eso se ajustan los
+selectores sin tener que adivinar.
+
+### Salida manual
+
+Si el scraping falla, el CSV bajado a mano se levanta igual:
 
 ```
 data/descargas/<CUIT>/ventas_<AAAAMMDD>_<AAAAMMDD>.csv
 ```
-
-La corrida siguiente lo levanta solo. También se puede importar directo:
 
 ```bash
 python main.py importar-csv --cuit 27123456780 ventas_marzo.csv
