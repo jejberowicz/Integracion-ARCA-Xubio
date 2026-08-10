@@ -58,6 +58,8 @@ class XubioClient:
         self._token_expira: dt.datetime | None = None
         self._cache_clientes: dict[str, Any] = {}
         self._puntos_venta: dict[int, Any] | None = None
+        self._existentes: dict[str, Any] | None = None
+        self._desde_cuando: str | None = None
 
     # --- Autenticación ---
 
@@ -295,6 +297,52 @@ class XubioClient:
         return nuevo_id
 
     # --- Comprobantes ---
+
+    def _indice_existentes(self) -> tuple[dict[str, Any], dt.date | None]:
+        """Comprobantes ya cargados en Xubio, indexados por número.
+
+        Devuelve también la fecha más vieja del listado: más allá de esa fecha
+        el índice no dice nada, porque la API devuelve una tanda y no todo el
+        histórico.
+        """
+        if self._existentes is None:
+            self._existentes = {}
+            fechas = []
+            for vista in self.get(RUTA_COMPROBANTE_VENTA) or []:
+                numero = vista.get("numeroDocumento")
+                if numero:
+                    self._existentes[numero.strip()] = _id_de(vista)
+                if vista.get("fecha"):
+                    fechas.append(vista["fecha"])
+            self._desde_cuando = min(fechas) if fechas else None
+            log.info(
+                "Xubio ya tiene %s comprobantes cargados (desde %s)",
+                len(self._existentes), self._desde_cuando,
+            )
+        limite = (
+            dt.date.fromisoformat(self._desde_cuando) if self._desde_cuando else None
+        )
+        return self._existentes, limite
+
+    def existente_en_xubio(self, cbte: Comprobante) -> tuple[str, Any]:
+        """Dice si el comprobante ya está en Xubio.
+
+        Los comprobantes pueden haberse cargado a mano o desde otro sistema, así
+        que la unicidad de nuestra base no alcanza para evitar duplicados en la
+        contabilidad del cliente.
+
+        Devuelve ('existe', id), ('no_existe', None) o ('sin_certeza', None),
+        este último cuando el comprobante es más viejo que lo que la API
+        devuelve y no se puede afirmar nada.
+        """
+        indice, mas_antiguo = self._indice_existentes()
+        numero = mapeo.numero_formateado(cbte)
+
+        if numero in indice:
+            return "existe", indice[numero]
+        if mas_antiguo is not None and cbte.fecha < mas_antiguo:
+            return "sin_certeza", None
+        return "no_existe", None
 
     def subir_comprobante(self, cbte: Comprobante) -> str:
         """Sube un comprobante de venta y devuelve su ID en Xubio."""

@@ -29,6 +29,10 @@ class Resultado:
     nuevos: int = 0
     subidos: int = 0
     fallidos: int = 0
+    #: Ya estaban en Xubio (cargados a mano o por otro sistema).
+    ya_estaban: int = 0
+    #: No se pudo confirmar si están; se dejan sin tocar.
+    sin_certeza: int = 0
     errores: list[str] = field(default_factory=list)
     #: True cuando el fallo lo tiene que resolver una persona (captcha, 2FA,
     #: un trámite pendiente en ARCA). En una corrida por cron es la diferencia
@@ -40,10 +44,17 @@ class Resultado:
         return not self.errores and self.fallidos == 0
 
     def resumen(self) -> str:
-        return (
-            f"{self.cuit} [{self.fuente}]: {self.descargados} descargados, "
-            f"{self.nuevos} nuevos, {self.subidos} subidos, {self.fallidos} fallidos"
-        )
+        partes = [
+            f"{self.descargados} descargados",
+            f"{self.nuevos} nuevos",
+            f"{self.subidos} subidos",
+        ]
+        if self.ya_estaban:
+            partes.append(f"{self.ya_estaban} ya estaban")
+        if self.sin_certeza:
+            partes.append(f"{self.sin_certeza} sin confirmar")
+        partes.append(f"{self.fallidos} fallidos")
+        return f"{self.cuit} [{self.fuente}]: " + ", ".join(partes)
 
 
 def clientes_activos(session: Session, cuit: str | None = None) -> list[Cliente]:
@@ -152,6 +163,33 @@ def subir(session: Session, cliente: Cliente, resultado: Resultado) -> None:
     for cbte in a_subir:
         cbte.intentos_sync += 1
         try:
+            # Xubio puede tener el comprobante cargado a mano o desde otro
+            # sistema. Nuestra clave única no lo sabe, así que hay que
+            # preguntarle a Xubio antes de crear nada.
+            estado, xubio_id = xubio.existente_en_xubio(cbte)
+
+            if estado == "existe":
+                cbte.xubio_id = str(xubio_id)
+                cbte.estado_sync = EstadoSync.SUBIDO
+                cbte.error_sync = None
+                cbte.fecha_sync = dt.datetime.now(dt.timezone.utc)
+                resultado.ya_estaban += 1
+                log.info("%s ya estaba en Xubio, no se duplica", cbte)
+                continue
+
+            if estado == "sin_certeza":
+                # Más viejo que lo que la API devuelve: ante la duda, no se
+                # sube. Duplicar en la contabilidad de un cliente es peor que
+                # dejarlo pendiente.
+                cbte.estado_sync = EstadoSync.ERROR
+                cbte.error_sync = (
+                    "No se pudo confirmar si ya está en Xubio (es anterior a los "
+                    "comprobantes que devuelve la API). Revisalo a mano y, si "
+                    "corresponde, marcalo como ignorado."
+                )
+                resultado.sin_certeza += 1
+                continue
+
             cbte.xubio_id = xubio.subir_comprobante(cbte)
             cbte.estado_sync = EstadoSync.SUBIDO
             cbte.error_sync = None

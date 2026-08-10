@@ -409,3 +409,25 @@ credencial). Un **FALLA** suele resolverse solo en la corrida siguiente.
 
 Un cliente que falla no frena a los demás: cada uno se procesa por separado y el
 resumen los lista a todos.
+
+## No duplicar lo que ya está en Xubio
+
+La unicidad `(cliente, tipo, punto de venta, número)` evita que la
+sincronización cargue dos veces el mismo comprobante, pero **no sabe nada de lo
+que ya hay en Xubio** cargado a mano o desde otro sistema.
+
+Antes de crear un comprobante, el programa le pregunta a Xubio si ya existe ese
+número. Los casos:
+
+| Situación | Qué hace |
+|---|---|
+| Ya está en Xubio | Lo marca como subido con el ID existente. No crea nada |
+| No está | Lo crea |
+| No se puede confirmar | **No lo sube** y lo deja para revisión manual |
+
+El tercer caso pasa con comprobantes más viejos que los que devuelve la API: en
+la duda no se sube, porque duplicar en la contabilidad de un cliente es más caro
+que dejar algo pendiente.
+
+Conviene correr `analizar-xubio` antes de la primera sincronización de un
+cliente, para ver desde cuándo tiene comprobantes cargados.
