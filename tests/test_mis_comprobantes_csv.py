@@ -134,3 +134,28 @@ def test_csv_con_columnas_faltantes_falla_claro(tmp_path):
     ruta.write_text("Fecha;Otra cosa\n2026-01-01;x\n", encoding="utf-8")
     with pytest.raises(ErrorMisComprobantes, match="no tiene las columnas esperadas"):
         list(MisComprobantes().importar_csv(ruta))
+
+
+# --- Selector de empresas representadas ---
+
+def test_deduplica_al_propio_usuario():
+    from src.afip.mis_comprobantes import _parsear_representados
+
+    # El servicio muestra al usuario dos veces: resaltado arriba y en la lista.
+    paneles = [
+        "GOMEZ JUAN CARLOS\n\n20-12345678-6",
+        "GOMEZ JUAN CARLOS\n20-12345678-6",
+        "OTRA EMPRESA S.R.L.\n20-11111111-2",
+        "EMPRESA DEMO S.A.\n30-71234567-1",
+    ]
+    assert _parsear_representados(paneles) == [
+        ("20123456786", "GOMEZ JUAN CARLOS"),
+        ("20111111112", "OTRA EMPRESA S.R.L."),
+        ("30712345671", "EMPRESA DEMO S.A."),
+    ]
+
+
+def test_ignora_paneles_que_no_son_empresas():
+    from src.afip.mis_comprobantes import _parsear_representados
+
+    assert _parsear_representados(["Menú Principal", "", "Ayuda\nalgo"]) == []

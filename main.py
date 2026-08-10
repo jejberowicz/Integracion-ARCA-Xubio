@@ -782,6 +782,63 @@ def activar(cuits: tuple[str, ...], solo: bool) -> None:
     click.echo(f"\nActivados: {len(activados)}. Desactivados: {len(desactivados)}.")
 
 
+@cli.command("representados")
+@click.option("--usuario", required=True, help="CUIT de la persona que entra al portal.")
+@click.option("--password", help="Si se omite, se usa la que ya esté cargada.")
+@click.option("--headed", is_flag=True, help="Navegador visible.")
+def representados(usuario: str, password: str | None, headed: bool) -> None:
+    """Lista qué empresas puede consultar una Clave Fiscal.
+
+    Una sola credencial suele cubrir varias empresas, así que esto evita salir a
+    pedir una por cliente. Cruza el resultado con los clientes cargados.
+    """
+    from src.afip.mis_comprobantes import MisComprobantes
+
+    usuario = normalizar_cuit(usuario)
+
+    with get_session() as session:
+        if not password:
+            fila = (
+                session.query(Cliente)
+                .filter_by(clave_fiscal_usuario=usuario)
+                .filter(Cliente.clave_fiscal_password.isnot(None))
+                .first()
+            )
+            if fila is None:
+                raise click.ClickException(
+                    f"No hay ninguna clave cargada para {formatear_cuit(usuario)}. "
+                    "Pasala con --password o cargala con 'credencial-fiscal'."
+                )
+            password = crypto.descifrar(fila.clave_fiscal_password)
+
+        try:
+            empresas = MisComprobantes().listar_representados(
+                usuario, password, headless=not headed
+            )
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        nuestros = {c.cuit: c for c in session.query(Cliente).all()}
+
+    click.echo(f"\n{formatear_cuit(usuario)} puede consultar {len(empresas)} empresas:\n")
+    coinciden = []
+    for cuit, nombre in empresas:
+        cliente = nuestros.get(cuit)
+        if cliente:
+            coinciden.append(cuit)
+            falta = "" if cliente.clave_fiscal_password else "  <- sin credencial cargada"
+            click.echo(f"  [cargado]    {formatear_cuit(cuit)}  {nombre[:34]:<34}{falta}")
+        else:
+            click.echo(f"  [no está]    {formatear_cuit(cuit)}  {nombre[:34]}")
+
+    if coinciden:
+        argumentos = " ".join(f"--cuit {c}" for c in coinciden)
+        click.echo(
+            f"\nPara cargarles la credencial a todos de una:\n"
+            f"  main.py credencial-fiscal {argumentos} --usuario {usuario}"
+        )
+
+
 @cli.command("credencial-fiscal")
 @click.option("--cuit", "cuits", multiple=True, required=True,
               help="Cliente al que corresponde. Repetible si comparten credencial.")

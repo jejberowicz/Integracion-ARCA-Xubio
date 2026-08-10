@@ -179,6 +179,25 @@ def _entero(valor: str | None) -> int | None:
     return int(m.group()) if m else None
 
 
+def _parsear_representados(textos: list[str]) -> list[tuple[str, str]]:
+    """Extrae (CUIT, nombre) de los paneles del selector de empresa.
+
+    El propio usuario aparece dos veces —una vez resaltado arriba y otra en la
+    lista—, así que se deduplica por CUIT conservando el orden.
+    """
+    from src.utils.helpers import normalizar_cuit
+
+    vistos: dict[str, str] = {}
+    for texto in textos:
+        lineas = [t.strip() for t in (texto or "").splitlines() if t.strip()]
+        if len(lineas) < 2:
+            continue
+        cuit = normalizar_cuit(lineas[-1])
+        if cuit and len(cuit) == 11:
+            vistos.setdefault(cuit, lineas[0])
+    return list(vistos.items())
+
+
 def _leer_texto(ruta: Path) -> str:
     """Devuelve el contenido del CSV, venga suelto o dentro de un ZIP.
 
@@ -465,6 +484,36 @@ class MisComprobantes(FuenteVentas):
                 raise ErrorMisComprobantes(
                     f"Falló la descarga: {exc}\nCapturas en {diagnostico.carpeta}"
                 ) from exc
+            finally:
+                contexto.close()
+
+    def listar_representados(
+        self, usuario: str, password: str, headless: bool = True
+    ) -> list[tuple[str, str]]:
+        """Empresas que ese usuario puede consultar en Mis Comprobantes.
+
+        Una Clave Fiscal suele cubrir varias empresas, así que conviene saber
+        cuáles antes de salir a pedir credenciales cliente por cliente.
+        """
+        from playwright.sync_api import sync_playwright
+
+        perfil = config.DOWNLOADS_PATH / ".perfiles" / str(usuario)
+        perfil.mkdir(parents=True, exist_ok=True)
+        diagnostico = Diagnostico(config.DOWNLOADS_PATH / ".debug" / str(usuario))
+
+        with sync_playwright() as p:
+            contexto = p.chromium.launch_persistent_context(
+                user_data_dir=str(perfil), headless=headless,
+                viewport={"width": 1440, "height": 900},
+            )
+            pagina = contexto.pages[0] if contexto.pages else contexto.new_page()
+            pagina.set_default_timeout(30_000)
+            try:
+                self._ir_al_portal(pagina, usuario, password, diagnostico)
+                servicio = self._abrir_mis_comprobantes(pagina, diagnostico)
+                return _parsear_representados(
+                    servicio.locator("a.panel").all_inner_texts()
+                )
             finally:
                 contexto.close()
 
