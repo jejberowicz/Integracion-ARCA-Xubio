@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
 import logging
 import re
 import unicodedata
+import zipfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterator
@@ -29,11 +31,17 @@ from src.afip.base import ComprobanteNormalizado, FuenteVentas, registrar
 from src.afip.inferencia import inferir_alicuotas
 from src.database.models import Cliente
 from src.security import crypto
+from src.utils.helpers import formatear_cuit
 
 log = logging.getLogger(__name__)
 
 URL_LOGIN = "https://auth.afip.gob.ar/contribuyente_/login.xhtml"
-URL_MIS_COMPROBANTES = "https://serviciosjava2.afip.gob.ar/mis-comprobantes/"
+
+# A Mis Comprobantes no se entra por URL: el servicio vive en fes.afip.gob.ar
+# pero exige venir del portal con la sesión armada, así que se llega buscándolo
+# en el buscador del portal. La URL directa devuelve 404.
+BUSCADOR_PORTAL = "#buscadorInput"
+NOMBRE_SERVICIO = "Mis Comprobantes"
 
 
 class ErrorMisComprobantes(RuntimeError):
@@ -53,42 +61,74 @@ def _slug(texto: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", sin_tildes.lower()).strip("_")
 
 
-# Cada campo interno con los fragmentos de encabezado que lo identifican.
-# El portal cambia los títulos cada tanto, así que se busca por subcadena.
+# Encabezados reales del CSV de Mis Comprobantes. Se listan exactos porque
+# varios se pisan por prefijo: "Imp. Neto Gravado Total" contra
+# "Imp. Neto Gravado IVA 0%", o "Total IVA" contra "IVA 21%".
 COLUMNAS = {
     "fecha": ("fecha_de_emision", "fecha_emision", "fecha"),
-    "tipo_cbte": ("tipo_de_comprobante", "tipo_comprobante", "tipo"),
+    "tipo_cbte": ("tipo_de_comprobante", "tipo_comprobante"),
     "pto_vta": ("punto_de_venta", "punto_venta"),
-    "nro_desde": ("numero_desde", "nro_desde", "numero"),
+    "nro_desde": ("numero_desde", "nro_desde"),
     "nro_hasta": ("numero_hasta", "nro_hasta"),
     "cae": ("cod_autorizacion", "codigo_de_autorizacion", "cae"),
     "doc_tipo": ("tipo_doc_receptor", "tipo_doc"),
-    "doc_nro": ("nro_doc_receptor", "nro_doc", "numero_doc"),
+    "doc_nro": ("nro_doc_receptor", "nro_doc"),
     "receptor": ("denominacion_receptor", "denominacion"),
     "cotizacion": ("tipo_cambio", "tipo_de_cambio"),
     "moneda": ("moneda",),
-    "neto": ("imp_neto_gravado", "neto_gravado"),
-    "no_gravado": ("imp_neto_no_gravado", "neto_no_gravado"),
-    "exento": ("imp_op_exentas", "op_exentas", "exento"),
-    "iva": ("iva",),
+    "neto": ("imp_neto_gravado_total", "imp_neto_gravado"),
+    "no_gravado": ("imp_neto_no_gravado",),
+    "exento": ("imp_op_exentas",),
     "tributos": ("otros_tributos", "imp_otros_tributos"),
-    "total": ("imp_total", "total"),
+    "iva": ("total_iva", "iva"),
+    "total": ("imp_total",),
 }
+
+# El CSV trae el IVA discriminado en pares de columnas por alícuota:
+#   "IVA 21%"  ->  importe    |  "Imp. Neto Gravado IVA 21%"  ->  base
+# El porcentaje viene con coma decimal ("IVA 2,5%"), que el slug deja como
+# "iva_2_5".
+_COL_IVA = re.compile(r"^iva_(\d+(?:_\d+)?)$")
+_COL_BASE = re.compile(r"^imp_neto_gravado_iva_(\d+(?:_\d+)?)$")
+
+
+def _porcentaje_desde_slug(texto: str) -> Decimal:
+    return Decimal(texto.replace("_", "."))
+
+
+def _mapear_alicuotas(encabezados: list[str]) -> dict[Decimal, dict[str, int]]:
+    """Ubica las columnas de importe y base de cada alícuota."""
+    columnas: dict[Decimal, dict[str, int]] = {}
+    for indice, encabezado in enumerate(encabezados):
+        slug = _slug(encabezado or "")
+        if (m := _COL_IVA.match(slug)):
+            columnas.setdefault(_porcentaje_desde_slug(m.group(1)), {})["iva"] = indice
+        elif (m := _COL_BASE.match(slug)):
+            columnas.setdefault(_porcentaje_desde_slug(m.group(1)), {})["base"] = indice
+    return columnas
 
 
 def _mapear_encabezados(encabezados: list[str]) -> dict[str, int]:
-    slugs = [_slug(h) for h in encabezados]
+    slugs = [_slug(h or "") for h in encabezados]
     mapa: dict[str, int] = {}
+
+    # Primero todas las coincidencias exactas: si se mezclara con la búsqueda
+    # por prefijo, "imp_neto_gravado" se quedaría con la columna del 0 %.
     for campo, alias in COLUMNAS.items():
-        for alias_slug in alias:
-            # Coincidencia exacta primero, después por prefijo.
-            if alias_slug in slugs:
-                mapa[campo] = slugs.index(alias_slug)
+        for a in alias:
+            if a in slugs:
+                mapa[campo] = slugs.index(a)
                 break
-            coincidencias = [i for i, s in enumerate(slugs) if s.startswith(alias_slug)]
-            if coincidencias:
-                mapa[campo] = coincidencias[0]
+
+    for campo, alias in COLUMNAS.items():
+        if campo in mapa:
+            continue
+        for a in alias:
+            candidatos = [i for i, s in enumerate(slugs) if s.startswith(a)]
+            if candidatos:
+                mapa[campo] = candidatos[0]
                 break
+
     faltantes = {"fecha", "tipo_cbte", "pto_vta", "nro_desde", "total"} - mapa.keys()
     if faltantes:
         raise ErrorMisComprobantes(
@@ -139,6 +179,65 @@ def _entero(valor: str | None) -> int | None:
     return int(m.group()) if m else None
 
 
+def _leer_texto(ruta: Path) -> str:
+    """Devuelve el contenido del CSV, venga suelto o dentro de un ZIP.
+
+    Mis Comprobantes exporta un .zip con el CSV adentro, aunque el navegador lo
+    guarde con otro nombre.
+    """
+    crudo = ruta.read_bytes()
+    if not crudo.startswith(b"PK"):
+        return crudo.decode("utf-8-sig", errors="replace")
+
+    with zipfile.ZipFile(io.BytesIO(crudo)) as zip_:
+        internos = [n for n in zip_.namelist() if n.lower().endswith(".csv")] or zip_.namelist()
+        if not internos:
+            raise ErrorMisComprobantes(f"El ZIP descargado está vacío: {ruta}")
+        log.debug("CSV dentro del ZIP: %s", internos[0])
+        return zip_.read(internos[0]).decode("utf-8-sig", errors="replace")
+
+
+# El portal escribe la moneda como símbolo, no con el código de AFIP.
+MONEDAS = {"$": "PES", "ARS": "PES", "U$S": "DOL", "USD": "DOL", "US$": "DOL"}
+
+
+def _moneda(valor: str | None) -> str:
+    texto = (valor or "").strip()
+    if not texto:
+        return "PES"
+    return MONEDAS.get(texto.upper(), MONEDAS.get(texto, texto[:3].upper()))
+
+
+def _alicuotas_del_csv(fila: list[str], columnas: dict) -> list:
+    """Arma el desglose de IVA a partir de las columnas por alícuota."""
+    from src.afip.base import AlicuotaIVA
+    from src.afip.tablas import ALICUOTAS_IVA
+
+    por_porcentaje = {v: k for k, v in ALICUOTAS_IVA.items()}
+    resultado = []
+
+    def valor(indice: int | None) -> Decimal:
+        # El 0 % trae columna de base pero no de importe, así que cada par
+        # puede venir incompleto.
+        if indice is None or indice >= len(fila):
+            return Decimal("0")
+        return _num(fila[indice])
+
+    for porcentaje, indices in sorted(columnas.items()):
+        base = valor(indices.get("base"))
+        importe = valor(indices.get("iva"))
+        if base == 0 and importe == 0:
+            continue  # la alícuota no se usó en este comprobante
+
+        alicuota_id = por_porcentaje.get(porcentaje)
+        if alicuota_id is None:
+            log.warning("Alícuota %s%% del CSV sin equivalente en AFIP", porcentaje)
+            continue
+        resultado.append(AlicuotaIVA(id=alicuota_id, base_imp=base, importe=importe))
+
+    return resultado
+
+
 def _fecha(valor: str) -> dt.date:
     texto = valor.strip()
     for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d"):
@@ -183,7 +282,7 @@ class MisComprobantes(FuenteVentas):
     ) -> Iterator[ComprobanteNormalizado]:
         """Parsea un CSV de Mis Comprobantes, bajado por el bot o a mano."""
         ruta = Path(ruta)
-        contenido = ruta.read_text(encoding="utf-8-sig", errors="replace")
+        contenido = _leer_texto(ruta)
         lineas = contenido.splitlines()
         lector = csv.reader(lineas, delimiter=_detectar_delimitador(lineas))
 
@@ -193,12 +292,13 @@ class MisComprobantes(FuenteVentas):
             raise ErrorMisComprobantes(f"El CSV está vacío: {ruta}") from None
 
         mapa = _mapear_encabezados(encabezados)
+        alicuotas = _mapear_alicuotas(encabezados)
 
         for numero_linea, fila in enumerate(lector, start=2):
             if not any(celda.strip() for celda in fila):
                 continue
             try:
-                cbte = self._normalizar(fila, mapa)
+                cbte = self._normalizar(fila, mapa, alicuotas)
             except ErrorMisComprobantes as exc:
                 log.warning("Línea %s de %s ignorada: %s", numero_linea, ruta.name, exc)
                 continue
@@ -208,7 +308,12 @@ class MisComprobantes(FuenteVentas):
                 continue
             yield cbte
 
-    def _normalizar(self, fila: list[str], mapa: dict[str, int]) -> ComprobanteNormalizado:
+    def _normalizar(
+        self,
+        fila: list[str],
+        mapa: dict[str, int],
+        columnas_alicuota: dict | None = None,
+    ) -> ComprobanteNormalizado:
         def celda(campo: str) -> str | None:
             idx = mapa.get(campo)
             if idx is None or idx >= len(fila):
@@ -223,7 +328,17 @@ class MisComprobantes(FuenteVentas):
 
         neto = _num(celda("neto"))
         iva = _num(celda("iva"))
-        alicuotas = inferir_alicuotas(neto, iva)
+
+        # El CSV trae el IVA discriminado en columnas por alícuota, así que ese
+        # dato es el bueno. Solo se infiere si el archivo no las tiene (formatos
+        # viejos del portal). Que no haya ninguna alícuota con importe no es
+        # falta de datos: en una Factura C no hay IVA que discriminar.
+        columnas_alicuota = columnas_alicuota or {}
+        inferidas = not columnas_alicuota
+        if inferidas:
+            alicuotas = inferir_alicuotas(neto, iva)
+        else:
+            alicuotas = _alicuotas_del_csv(fila, columnas_alicuota)
 
         cotizacion = _num(celda("cotizacion")) or Decimal("1")
 
@@ -241,11 +356,11 @@ class MisComprobantes(FuenteVentas):
             doc_tipo=_entero(celda("doc_tipo")),
             doc_nro=(celda("doc_nro") or "").strip() or None,
             receptor_nombre=(celda("receptor") or "").strip() or None,
-            moneda=(celda("moneda") or "PES").strip()[:3].upper() or "PES",
+            moneda=_moneda(celda("moneda")),
             cotizacion=cotizacion,
             cae=(celda("cae") or "").strip() or None,
             alicuotas_iva=alicuotas,
-            alicuotas_inferidas=True,
+            alicuotas_inferidas=inferidas,
             fuente=self.nombre,
             raw={"csv": fila},
         )
@@ -324,18 +439,18 @@ class MisComprobantes(FuenteVentas):
 
             try:
                 self._ir_al_portal(pagina, usuario, password, diagnostico)
-                self._elegir_representado(pagina, cliente, diagnostico)
-                self._abrir_mis_comprobantes(pagina, diagnostico)
+                servicio = self._abrir_mis_comprobantes(pagina, diagnostico)
+                self._elegir_empresa(servicio, cliente, diagnostico)
 
                 if explorar:
-                    diagnostico.volcar(pagina, "mis-comprobantes")
+                    diagnostico.volcar(servicio, "mis-comprobantes")
                     raise ExploracionTerminada(
                         "Exploración completa. Revisá los archivos en:\n"
                         f"  {diagnostico.carpeta}\n"
                         "Con eso se pueden ajustar los selectores de la descarga."
                     )
 
-                return self._exportar(pagina, cliente, desde, hasta, destino, diagnostico)
+                return self._exportar(servicio, cliente, desde, hasta, destino, diagnostico)
 
             except (ExploracionTerminada, ErrorMisComprobantes):
                 raise
@@ -390,66 +505,105 @@ class MisComprobantes(FuenteVentas):
             )
         log.info("Login OK")
 
-    def _elegir_representado(self, pagina, cliente: Cliente, diag: "Diagnostico") -> None:
-        """Cambia al CUIT de la empresa si el usuario entra como persona física."""
-        if str(cliente.clave_fiscal_usuario) == cliente.cuit:
-            return  # entra directamente como el contribuyente
+    def _abrir_mis_comprobantes(self, pagina, diag: "Diagnostico"):
+        """Abre el servicio desde el buscador del portal y devuelve su pestaña."""
+        log.info("Abriendo %s desde el portal", NOMBRE_SERVICIO)
+        pagina.fill(BUSCADOR_PORTAL, NOMBRE_SERVICIO)
+        pagina.wait_for_timeout(2500)  # el buscador filtra por JS mientras se tipea
 
-        log.info("Seleccionando representado %s", cliente.cuit)
-        try:
-            pagina.click("#represented-selector, .representado, [id*='representado']", timeout=5000)
-            pagina.fill("input[type='search'], #buscadorRepresentado", cliente.cuit, timeout=5000)
-            pagina.keyboard.press("Enter")
-            pagina.wait_for_load_state("networkidle")
-        except Exception:
-            # El selector de representado cambia seguido; no es fatal, porque
-            # muchas veces el servicio permite elegir la empresa más adelante.
-            diag.volcar(pagina, "representado")
-            log.warning(
-                "No se pudo cambiar de representado automáticamente. "
-                "Capturas en %s", diag.carpeta
+        enlace = pagina.locator("a.dropdown-item", has_text=NOMBRE_SERVICIO).first
+        if enlace.count() == 0:
+            diag.volcar(pagina, "sin-servicio")
+            raise ErrorMisComprobantes(
+                f"El buscador del portal no encontró '{NOMBRE_SERVICIO}'. "
+                "Probablemente el usuario no tenga adherido el servicio: se "
+                "agrega desde el Administrador de Relaciones."
             )
 
-    def _abrir_mis_comprobantes(self, pagina, diag: "Diagnostico") -> None:
-        log.info("Abriendo Mis Comprobantes")
-        pagina.goto(URL_MIS_COMPROBANTES, wait_until="domcontentloaded")
-        pagina.wait_for_load_state("networkidle")
+        # El servicio se abre en una pestaña nueva.
+        try:
+            with pagina.context.expect_page(timeout=30_000) as nueva:
+                enlace.click()
+            servicio = nueva.value
+        except Exception:
+            servicio = pagina  # por si algún día deja de abrir pestaña
+
+        servicio.wait_for_load_state("networkidle")
+        servicio.set_default_timeout(30_000)
+        log.info("Servicio abierto en %s", servicio.url)
+        return servicio
+
+    def _elegir_empresa(self, servicio, cliente: Cliente, diag: "Diagnostico") -> None:
+        """Elige el contribuyente entre los que representa el usuario.
+
+        La primera pantalla del servicio lista un panel por representado. Se
+        busca por CUIT formateado, que es unívoco, y no por razón social, que
+        puede estar escrita distinto en ARCA que en nuestra base.
+        """
+        cuit_formateado = formatear_cuit(cliente.cuit)
+        panel = servicio.locator("a.panel", has_text=cuit_formateado).first
+
+        if panel.count() == 0:
+            diag.volcar(servicio, "sin-representado")
+            disponibles = [
+                t.strip().replace("\n", " ")
+                for t in servicio.locator("a.panel").all_inner_texts()
+            ]
+            raise ErrorMisComprobantes(
+                f"El usuario {cliente.clave_fiscal_usuario} no representa a "
+                f"{cuit_formateado} en Mis Comprobantes.\n"
+                f"Representa a: {disponibles}\n"
+                "La empresa tiene que delegarle el servicio en su Administrador "
+                "de Relaciones."
+            )
+
+        log.info("Entrando como %s", cuit_formateado)
+        panel.click()
+        servicio.wait_for_load_state("networkidle")
 
     def _exportar(
-        self, pagina, cliente: Cliente, desde: dt.date, hasta: dt.date,
+        self, servicio, cliente: Cliente, desde: dt.date, hasta: dt.date,
         destino: Path, diag: "Diagnostico",
     ) -> Path:
-        """Filtra por 'Emitidos' y el rango de fechas, y baja el CSV."""
-        log.info("Filtrando emitidos del %s al %s", desde, hasta)
+        """Filtra los comprobantes emitidos del período y baja el CSV."""
+        log.info("Consultando emitidos del %s al %s", desde, hasta)
+        servicio.click("#btnEmitidos")
+        servicio.wait_for_load_state("networkidle")
 
-        for texto in ("Emitidos", "Ventas", "Comprobantes emitidos"):
-            enlace = pagina.get_by_text(texto, exact=False).first
-            if enlace.count() > 0:
-                enlace.click()
-                pagina.wait_for_load_state("networkidle")
-                break
+        # El rango va en un solo campo (daterangepicker), no en dos.
+        rango = f"{desde:%d/%m/%Y} - {hasta:%d/%m/%Y}"
+        servicio.fill("#fechaEmision", rango)
+        servicio.keyboard.press("Escape")  # cierra el calendario emergente
 
-        _completar_fecha(pagina, ("fechaEmisionDesde", "fechaDesde", "desde"), desde)
-        _completar_fecha(pagina, ("fechaEmisionHasta", "fechaHasta", "hasta"), hasta)
+        servicio.click("#buscarComprobantes")
+        servicio.wait_for_load_state("networkidle")
+        servicio.wait_for_timeout(2000)
 
-        boton_buscar = pagina.get_by_role("button", name=re.compile("buscar", re.I)).first
-        if boton_buscar.count() > 0:
-            boton_buscar.click()
-            pagina.wait_for_load_state("networkidle")
+        boton = _boton_csv(servicio)
+        if boton is None:
+            diag.volcar(servicio, "sin-csv")
+            texto = servicio.inner_text("body")[:200].replace("\n", " ")
+            raise ErrorMisComprobantes(
+                "No apareció el botón de exportar a CSV. Puede que no haya "
+                f"comprobantes en el período. La página dice: {texto!r}. "
+                f"Diagnóstico en {diag.carpeta}"
+            )
 
-        with pagina.expect_download(timeout=120_000) as espera:
-            exportar = pagina.get_by_text(re.compile("csv", re.I)).first
-            if exportar.count() == 0:
-                diag.volcar(pagina, "sin-boton-csv")
-                raise ErrorMisComprobantes(
-                    "No se encontró el botón de exportar a CSV. "
-                    f"Capturas en {diag.carpeta}"
-                )
-            exportar.click()
-
+        with servicio.expect_download(timeout=120_000) as espera:
+            boton.click()
         espera.value.save_as(str(destino))
         log.info("CSV guardado en %s", destino)
         return destino
+
+
+def _boton_csv(pagina):
+    """Encuentra el botón de exportar a CSV entre las variantes del portal."""
+    for selector in ("#btnCsv", "#exportarCsv", "a[href*='csv']", "button[id*='sv']"):
+        elemento = pagina.locator(selector).first
+        if elemento.count() > 0:
+            return elemento
+    porTexto = pagina.get_by_text(re.compile(r"\bcsv\b", re.I)).first
+    return porTexto if porTexto.count() > 0 else None
 
 
 class ExploracionTerminada(ErrorMisComprobantes):

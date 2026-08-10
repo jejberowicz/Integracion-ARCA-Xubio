@@ -20,10 +20,10 @@ Cada empresa elige de dónde salen sus ventas:
 > (*Administración de puntos de venta y domicilios*) de qué sistema es el punto
 > de venta: si dice "Comprobantes en Línea", el certificado no sirve para nada.
 
-`wsfe` es la preferida: trae el desglose por alícuota de IVA, el receptor y el CAE.
-`mis_comprobantes` trae menos datos, así que **el desglose de IVA se infiere** a
-partir del neto y el IVA total, y queda marcado como tal en la base
-(`alicuotas_inferidas`).
+Las dos fuentes traen el desglose de IVA por alícuota: el CSV del portal tiene
+una columna de importe y otra de base por cada tasa (2,5 / 5 / 10,5 / 21 / 27).
+La inferencia quedó solo como respaldo para formatos viejos que no tengan esas
+columnas, y cuando se usa queda marcado en `alicuotas_inferidas`.
 
 ## Puesta en marcha
 
