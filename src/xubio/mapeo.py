@@ -17,63 +17,45 @@ from src.afip.tablas import (
 )
 from src.database.models import Comprobante
 
-# Nombre del tipo de comprobante tal como Xubio lo espera.
-# Xubio distingue por documento y letra; las notas de crédito son su propio tipo,
-# por eso los importes se mandan siempre positivos.
+# Tipo de documento en Xubio. Es un entero, y la letra fiscal NO va acá: viaja
+# como prefijo de numeroDocumento ("C-00002-00001201"). Verificado contra datos
+# reales de la API: 1 = Factura, 3 = Nota de Crédito.
+FACTURA, NOTA_DEBITO, NOTA_CREDITO = 1, 2, 3
+
 TIPO_XUBIO = {
-    1: "FACTURA_A",
-    2: "NOTA_DEBITO_A",
-    3: "NOTA_CREDITO_A",
-    6: "FACTURA_B",
-    7: "NOTA_DEBITO_B",
-    8: "NOTA_CREDITO_B",
-    11: "FACTURA_C",
-    12: "NOTA_DEBITO_C",
-    13: "NOTA_CREDITO_C",
-    19: "FACTURA_E",
-    20: "NOTA_DEBITO_E",
-    21: "NOTA_CREDITO_E",
-    51: "FACTURA_M",
-    52: "NOTA_DEBITO_M",
-    53: "NOTA_CREDITO_M",
-    # Tiques de controlador fiscal: contablemente equivalen a la factura de su letra.
-    81: "FACTURA_A",
-    82: "FACTURA_B",
-    83: "FACTURA_B",
-    109: "FACTURA_C",
-    111: "FACTURA_C",
-    112: "NOTA_CREDITO_A",
-    113: "NOTA_CREDITO_B",
-    114: "NOTA_CREDITO_C",
-    115: "NOTA_DEBITO_A",
-    116: "NOTA_DEBITO_B",
-    117: "NOTA_DEBITO_C",
-    118: "FACTURA_M",
-    119: "NOTA_CREDITO_M",
-    120: "NOTA_DEBITO_M",
-    201: "FACTURA_A",
-    202: "NOTA_DEBITO_A",
-    203: "NOTA_CREDITO_A",
-    206: "FACTURA_B",
-    207: "NOTA_DEBITO_B",
-    208: "NOTA_CREDITO_B",
-    211: "FACTURA_C",
-    212: "NOTA_DEBITO_C",
-    213: "NOTA_CREDITO_C",
+    1: FACTURA, 2: NOTA_DEBITO, 3: NOTA_CREDITO,          # A
+    6: FACTURA, 7: NOTA_DEBITO, 8: NOTA_CREDITO,          # B
+    11: FACTURA, 12: NOTA_DEBITO, 13: NOTA_CREDITO,       # C
+    19: FACTURA, 20: NOTA_DEBITO, 21: NOTA_CREDITO,       # E (exportación)
+    51: FACTURA, 52: NOTA_DEBITO, 53: NOTA_CREDITO,       # M
+    # Tiques de controlador fiscal: contablemente son la factura de su letra.
+    81: FACTURA, 82: FACTURA, 83: FACTURA,
+    109: FACTURA, 111: FACTURA, 118: FACTURA,
+    112: NOTA_CREDITO, 113: NOTA_CREDITO, 114: NOTA_CREDITO, 119: NOTA_CREDITO,
+    115: NOTA_DEBITO, 116: NOTA_DEBITO, 117: NOTA_DEBITO, 120: NOTA_DEBITO,
+    # Factura de Crédito Electrónica MiPyME
+    201: FACTURA, 202: NOTA_DEBITO, 203: NOTA_CREDITO,
+    206: FACTURA, 207: NOTA_DEBITO, 208: NOTA_CREDITO,
+    211: FACTURA, 212: NOTA_DEBITO, 213: NOTA_CREDITO,
 }
 
+# IDs de moneda de Xubio (de /monedaBean). Son negativos y fijos por cuenta.
 MONEDA_XUBIO = {
-    "PES": "ARS",
-    "DOL": "USD",
-    "060": "EUR",
+    "PES": -2,   # PESOS_ARGENTINOS
+    "DOL": -3,   # DOLARES
+    "060": -4,   # EUROS
 }
+MONEDA_POR_DEFECTO = -2
+
+# 1 = contado. Xubio lo exige; no lo informa ni AFIP ni Mis Comprobantes.
+CONDICION_DE_PAGO_CONTADO = 1
 
 
 class ErrorMapeo(RuntimeError):
     pass
 
 
-def tipo_xubio(tipo_cbte: int) -> str:
+def tipo_xubio(tipo_cbte: int) -> int:
     if tipo_cbte not in TIPO_XUBIO:
         raise ErrorMapeo(
             f"No hay equivalencia en Xubio para el comprobante AFIP tipo "
@@ -83,8 +65,8 @@ def tipo_xubio(tipo_cbte: int) -> str:
     return TIPO_XUBIO[tipo_cbte]
 
 
-def moneda_xubio(moneda_afip: str) -> str:
-    return MONEDA_XUBIO.get(moneda_afip, moneda_afip)
+def moneda_xubio(moneda_afip: str) -> int:
+    return MONEDA_XUBIO.get(moneda_afip, MONEDA_POR_DEFECTO)
 
 
 def es_nota_credito(tipo_cbte: int) -> bool:
@@ -92,7 +74,9 @@ def es_nota_credito(tipo_cbte: int) -> bool:
 
 
 def numero_formateado(cbte: Comprobante) -> str:
-    return f"{cbte.pto_vta:05d}-{cbte.nro:08d}"
+    """Como lo espera Xubio: 'C-00002-00001201', con la letra fiscal adelante."""
+    letra = letra_comprobante(cbte.tipo_cbte) or "C"
+    return f"{letra}-{cbte.pto_vta:05d}-{cbte.nro:08d}"
 
 
 def resolver_producto(
@@ -135,13 +119,21 @@ def resolver_producto(
 
 
 def _linea(producto_id, descripcion: str, importe: Decimal, iva: float) -> dict:
+    """Renglón de ``transaccionProductoItems``, con los campos que usa Xubio.
+
+    ``iva`` es el porcentaje (21.0, 10.5, 0.0) y ``montoExento`` el importe que
+    no tributa; para las líneas gravadas va en cero.
+    """
+    neto = float(importe)
     return {
         "producto": {"ID": producto_id},
         "descripcion": descripcion,
-        "cantidad": 1,
-        "precio": float(importe),
+        "cantidad": 1.0,
+        "precio": neto,
+        "importe": neto,
         "iva": iva,
-        "importe": float(importe),
+        "montoExento": 0.0 if iva else neto,
+        "porcentajeDescuento": 0.0,
     }
 
 
@@ -205,30 +197,28 @@ def armar_payload(
             "un producto/servicio existente en cada línea del comprobante."
         )
 
+    items = _items_desde_alicuotas(cbte, producto_id, productos_por_alicuota)
+
+    # Xubio referencia sus maestros como objetos {"ID": n}, no como enteros
+    # sueltos, y los importes van con estos nombres exactos (ojo con
+    # 'importetotal', todo en minúscula).
     payload = {
         "tipo": tipo_xubio(cbte.tipo_cbte),
-        "letra": letra_comprobante(cbte.tipo_cbte),
+        "numeroDocumento": numero_formateado(cbte),
         "cliente": {"ID": cliente_xubio_id},
         "fecha": cbte.fecha.isoformat(),
         "fechaVto": (cbte.fecha_vto_cae or cbte.fecha).isoformat(),
-        "puntoVenta": cbte.pto_vta,
-        "numeroDocumento": numero_formateado(cbte),
-        "moneda": moneda_xubio(cbte.moneda),
+        "moneda": {"ID": moneda_xubio(cbte.moneda)},
         "cotizacion": float(cbte.cotizacion or 1),
-        "importeTotal": float(cbte.imp_total),
-        "transaccionProductoItems": _items_desde_alicuotas(
-            cbte, producto_id, productos_por_alicuota
-        ),
-        "descripcion": (
-            f"Importado de ARCA ({cbte.fuente})"
-            + (f" - CAE {cbte.cae}" if cbte.cae else "")
-        ),
-        # Referencia cruzada para poder rastrear el comprobante desde Xubio.
-        "numeroReferencia": f"{cbte.tipo_cbte}-{numero_formateado(cbte)}",
+        "importeGravado": float(cbte.imp_neto),
+        "importeImpuestos": float(cbte.imp_iva + cbte.imp_trib),
+        "importetotal": float(cbte.imp_total),
+        "condicionDePago": CONDICION_DE_PAGO_CONTADO,
+        "transaccionProductoItems": items,
     }
 
     if punto_venta_id is not None:
-        payload["puntoVentaId"] = punto_venta_id
+        payload["puntoVenta"] = {"ID": punto_venta_id}
 
     return payload
 

@@ -24,7 +24,10 @@ log = logging.getLogger(__name__)
 # operar en producción: Xubio cambió los nombres entre versiones.
 RUTA_COMPROBANTE_VENTA = "/comprobanteVentaBean"
 RUTA_CLIENTES = "/clienteBean"
-RUTA_PRODUCTOS = "/productoBean"
+RUTA_PUNTOS_VENTA = "/puntoVentaBean"
+# Xubio no expone un recurso de productos: el catálogo se deduce de los
+# comprobantes ya cargados (ver XubioClient.productos_conocidos).
+RUTA_PRODUCTOS = RUTA_COMPROBANTE_VENTA
 
 REINTENTOS = 3
 ESPERA_REINTENTO = 2  # segundos, se duplica en cada intento
@@ -54,6 +57,7 @@ class XubioClient:
         self._token: str | None = None
         self._token_expira: dt.datetime | None = None
         self._cache_clientes: dict[str, Any] = {}
+        self._puntos_venta: dict[int, Any] | None = None
 
     # --- Autenticación ---
 
@@ -69,9 +73,12 @@ class XubioClient:
             return self._token  # type: ignore[return-value]
 
         log.info("Autenticando en Xubio para %s", self.cliente.cuit)
-        respuesta = self.sesion.get(
+        # POST con el grant_type como form-data y las credenciales en el header
+        # Basic. Con GET el endpoint devuelve 200 y cuerpo vacío en vez de un
+        # error, y mandar las credenciales en el cuerpo da 400.
+        respuesta = self.sesion.post(
             config.XUBIO_TOKEN_URL,
-            params={"grant_type": "client_credentials"},
+            data={"grant_type": "client_credentials"},
             auth=HTTPBasicAuth(self.client_id, self.secret),
             timeout=config.XUBIO_TIMEOUT,
         )
@@ -177,6 +184,41 @@ class XubioClient:
         self._cache_clientes[clave] = resultado
         return resultado
 
+    def productos_conocidos(self) -> list[dict]:
+        """Catálogo de productos deducido de los comprobantes ya cargados.
+
+        La API no expone un recurso de productos (``/productoBean`` y sus
+        variantes devuelven 500), pero cada renglón de un comprobante trae el
+        producto embebido con su ID, así que se juntan de ahí.
+        """
+        vistos: dict[Any, dict] = {}
+        for resumen in self.get(RUTA_COMPROBANTE_VENTA) or []:
+            transaccion = _id_de(resumen)
+            if transaccion is None:
+                continue
+            detalle = self.get(f"{RUTA_COMPROBANTE_VENTA}/{transaccion}")
+            for item in (detalle or {}).get("transaccionProductoItems") or []:
+                producto = item.get("producto") or {}
+                pid = _id_de(producto)
+                if pid is not None and pid not in vistos:
+                    vistos[pid] = {
+                        "ID": pid,
+                        "nombre": producto.get("nombre"),
+                        "codigo": producto.get("codigo"),
+                        "iva_visto": item.get("iva"),
+                    }
+        return sorted(vistos.values(), key=lambda p: str(p.get("nombre") or ""))
+
+    def punto_venta_id(self, pto_vta: int) -> Any | None:
+        """Traduce el número de punto de venta de AFIP al ID interno de Xubio."""
+        if self._puntos_venta is None:
+            self._puntos_venta = {}
+            for pv in self.get(RUTA_PUNTOS_VENTA) or []:
+                numero = str(pv.get("puntoVenta") or pv.get("codigo") or "").strip()
+                if numero.isdigit():
+                    self._puntos_venta[int(numero)] = _id_de(pv)
+        return self._puntos_venta.get(int(pto_vta))
+
     def asegurar_cliente(self, cbte: Comprobante) -> Any:
         """Devuelve el ID del receptor en Xubio, creándolo si no existe."""
         datos = mapeo.datos_cliente_xubio(cbte)
@@ -205,6 +247,8 @@ class XubioClient:
         conf = self.cliente.config_xubio or {}
         cliente_xubio_id = self.asegurar_cliente(cbte)
         punto_venta_id = (conf.get("punto_venta_ids") or {}).get(str(cbte.pto_vta))
+        if punto_venta_id is None:
+            punto_venta_id = self.punto_venta_id(cbte.pto_vta)
 
         payload = mapeo.armar_payload(
             cbte,
@@ -236,7 +280,10 @@ def _id_de(objeto: Any) -> Any:
     if isinstance(objeto, (str, int)):
         return objeto
     if isinstance(objeto, dict):
-        for clave in ("ID", "id", "transaccionid", "clienteid", "productoid"):
+        for clave in (
+            "ID", "id", "transaccionid", "cliente_id", "puntoVentaId",
+            "moneda_id", "productoid", "clienteid",
+        ):
             if objeto.get(clave) is not None:
                 return objeto[clave]
     return None

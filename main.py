@@ -568,7 +568,7 @@ def probar_xubio(
     """
     import json
 
-    from src.xubio.client import RUTA_CLIENTES, RUTA_PRODUCTOS, XubioClient
+    from src.xubio.client import RUTA_CLIENTES, XubioClient
 
     if not cuit and not (client_id and secret):
         raise click.ClickException(
@@ -600,8 +600,10 @@ def probar_xubio(
         if not listar:
             return
 
-        ruta = RUTA_PRODUCTOS if listar == "productos" else RUTA_CLIENTES
-        datos = xubio.get(ruta)
+        if listar == "productos":
+            datos = xubio.productos_conocidos()
+        else:
+            datos = xubio.get(RUTA_CLIENTES)
         if isinstance(datos, list):
             click.echo(f"\n{len(datos)} {listar}:")
             for item in datos[:50]:

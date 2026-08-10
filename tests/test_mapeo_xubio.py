@@ -35,14 +35,15 @@ def hacer_comprobante(**kwargs) -> Comprobante:
 def test_payload_de_factura_a():
     payload = armar_payload(hacer_comprobante(), cliente_xubio_id=42, producto_id=777)
 
-    assert payload["tipo"] == "FACTURA_A"
-    assert payload["letra"] == "A"
+    assert payload["tipo"] == 1
     assert payload["cliente"] == {"ID": 42}
     assert payload["fecha"] == "2026-03-05"
-    assert payload["numeroDocumento"] == "00003-00000125"
-    assert payload["moneda"] == "ARS"
-    assert payload["importeTotal"] == 12100.0
-    assert "74123456789012" in payload["descripcion"]
+    # La letra fiscal va como prefijo del número, no en un campo aparte.
+    assert payload["numeroDocumento"] == "A-00003-00000125"
+    assert payload["moneda"] == {"ID": -2}
+    assert payload["importetotal"] == 12100.0
+    assert payload["importeGravado"] == 10000.0
+    assert payload["importeImpuestos"] == 2100.0
 
 
 def test_una_linea_por_alicuota():
@@ -80,8 +81,9 @@ def test_nota_de_credito_usa_su_propio_tipo_con_importes_positivos():
     payload = armar_payload(
         hacer_comprobante(tipo_cbte=3), cliente_xubio_id=1, producto_id=777
     )
-    assert payload["tipo"] == "NOTA_CREDITO_A"
-    assert payload["importeTotal"] > 0
+    assert payload["tipo"] == 3
+    assert payload["numeroDocumento"].startswith("A-")
+    assert payload["importetotal"] > 0
 
 
 def test_falta_producto_falla_con_mensaje_util():

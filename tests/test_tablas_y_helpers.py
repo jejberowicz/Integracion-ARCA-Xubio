@@ -39,10 +39,12 @@ def test_consumidor_final():
 
 
 def test_tipo_xubio_conocido():
-    assert tipo_xubio(1) == "FACTURA_A"
-    assert tipo_xubio(8) == "NOTA_CREDITO_B"
-    # Los tiques de controlador fiscal caen en la factura de su misma letra.
-    assert tipo_xubio(82) == "FACTURA_B"
+    # En Xubio el tipo es un entero y la letra viaja en numeroDocumento.
+    assert tipo_xubio(1) == 1     # Factura A -> Factura
+    assert tipo_xubio(8) == 3     # Nota de Crédito B -> Nota de Crédito
+    assert tipo_xubio(12) == 2    # Nota de Débito C -> Nota de Débito
+    # Los tiques de controlador fiscal son la factura de su misma letra.
+    assert tipo_xubio(82) == 1
 
 
 def test_tipo_xubio_desconocido_falla_explicito():
