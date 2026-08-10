@@ -6,8 +6,19 @@ Cada empresa elige de dónde salen sus ventas:
 
 | Fuente | Cuándo usarla | Qué necesita |
 |---|---|---|
-| `wsfe` | El cliente emite todo por **Comprobantes en Línea** | Certificado digital (`.key` + `.crt`) |
-| `mis_comprobantes` | El cliente tiene **controlador fiscal** u otros comprobantes que no pasan por CAE | Clave Fiscal |
+| `wsfe` | El cliente factura desde un **sistema integrado por web service** (su punto de venta figura como *Factura Electrónica - Web Service* en ARCA) | Certificado digital (`.key` + `.crt`) |
+| `mis_comprobantes` | Todo el resto: **Comprobantes en Línea**, **controlador fiscal**, talonario manual | Clave Fiscal |
+
+> **Importante.** WSFEv1 solo ve los puntos de venta habilitados para web
+> service. Si el cliente factura desde el portal de Comprobantes en Línea, sus
+> comprobantes **no se pueden leer por API**, por más que el certificado esté
+> bien: `FECompUltimoAutorizado` devuelve 11002 ("El punto de venta no se
+> encuentra habilitado a usar en el presente WS") y `FECompConsultar` devuelve
+> 602. Verificado contra producción. Esos clientes van por `mis_comprobantes`.
+>
+> Antes de tramitar un certificado, conviene mirar en ARCA
+> (*Administración de puntos de venta y domicilios*) de qué sistema es el punto
+> de venta: si dice "Comprobantes en Línea", el certificado no sirve para nada.
 
 `wsfe` es la preferida: trae el desglose por alícuota de IVA, el receptor y el CAE.
 `mis_comprobantes` trae menos datos, así que **el desglose de IVA se infiere** a
@@ -303,5 +314,5 @@ test_solo_lectura_afip.py` lo verifica sobre el código fuente y falla si
 alguien agrega una llamada de escritura, así que la garantía no depende de
 acordarse.
 
-Los comprobantes hechos desde **Comprobantes en Línea** se leen igual por
-WSFEv1: es la misma información, consultada por otra vía.
+**WSFEv1 no lee los comprobantes hechos desde Comprobantes en Línea.** Ver la
+sección siguiente: es una limitación de AFIP, no del programa.

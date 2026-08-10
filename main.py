@@ -543,9 +543,28 @@ def probar_afip(cuit: str) -> None:
         configurados = (cliente.config_xubio or {}).get("puntos_venta")
         puntos = fuente.puntos_de_venta(soap, fuente._auth(creds), configurados)
 
+        if puntos and not configurados:
+            click.echo(f"Puntos de venta informados por AFIP: {', '.join(map(str, puntos))}")
+            return
+
         if puntos:
-            origen = "configurados a mano" if configurados else "informados por AFIP"
-            click.echo(f"Puntos de venta ({origen}): {', '.join(map(str, puntos))}")
+            # Los configurados a mano hay que probarlos: que estén en la config
+            # no significa que WSFEv1 los acepte.
+            click.echo(f"Puntos de venta configurados a mano: {', '.join(map(str, puntos))}")
+            click.echo("Verificando que respondan...")
+            algunos_andan = False
+            for pto in puntos:
+                try:
+                    ultimo = fuente._ultimo_autorizado(soap, fuente._auth(creds), pto, 11)
+                    click.echo(f"  PtoVta {pto}: responde (último Factura C: {ultimo})")
+                    algunos_andan = True
+                except Exception as exc:
+                    click.echo(f"  PtoVta {pto}: NO responde -> {str(exc)[:110]}")
+            if not algunos_andan:
+                click.echo(
+                    "\nNinguno responde. Son puntos de venta que no están habilitados\n"
+                    "para web service, así que este cliente va por 'mis_comprobantes'."
+                )
             return
 
         click.echo(
@@ -556,13 +575,16 @@ def probar_afip(cuit: str) -> None:
             "controlador fiscal, porque esos puntos de venta son de otro tipo y\n"
             "FEParamGetPtosVenta no los lista.\n"
             "\n"
-            "Qué hacer:\n"
-            "  1. En ARCA, servicio 'Administración de puntos de venta y domicilios',\n"
-            "     mirá qué puntos de venta tiene y de qué sistema son.\n"
-            "  2. Si son de 'Comprobantes en Línea', cargalos igual y probá:\n"
-            f"       main.py mapear-punto-venta --cuit {cliente.cuit} --pto-vta N\n"
-            "     Algunos responden a la consulta aunque no estén habilitados a emitir.\n"
-            "  3. Si tampoco andan, ese cliente va por la fuente 'mis_comprobantes'."
+            "Verificado contra AFIP: un punto de venta de Comprobantes en Línea\n"
+            "devuelve 11002 en FECompUltimoAutorizado y 602 en FECompConsultar.\n"
+            "WSFEv1 no puede leer esos comprobantes.\n"
+            "\n"
+            "Este cliente va por la otra fuente:\n"
+            f"  main.py cambiar-fuente --cuit {cliente.cuit} --fuente mis_comprobantes\n"
+            "\n"
+            "La fuente 'wsfe' sirve solo si el contribuyente factura desde un sistema\n"
+            "integrado por web service, que es cuando el punto de venta figura como\n"
+            "'Factura Electrónica - Web Service' en ARCA."
         )
 
 
@@ -661,6 +683,35 @@ def activar(cuits: tuple[str, ...], solo: bool) -> None:
     for nombre in desactivados:
         click.echo(f"  desactivado {nombre}")
     click.echo(f"\nActivados: {len(activados)}. Desactivados: {len(desactivados)}.")
+
+
+@cli.command("cambiar-fuente")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option("--fuente", type=click.Choice(FuenteVentas.TODAS), required=True)
+@click.option("--clave-fiscal-password", help="Necesaria al pasar a mis_comprobantes.")
+def cambiar_fuente(
+    cuits: tuple[str, ...], fuente: str, clave_fiscal_password: str | None
+) -> None:
+    """Cambia de dónde se bajan las ventas de un cliente."""
+    with get_session() as session:
+        for cuit in cuits:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                click.echo(f"  !! no existe {cuit}")
+                continue
+
+            if clave_fiscal_password:
+                cliente.clave_fiscal_password = crypto.cifrar(clave_fiscal_password)
+
+            problema = _validar_coherencia(cliente, {}, fuente)
+            if problema:
+                click.echo(f"  !! {cliente.razon_social}: {problema}")
+                continue
+
+            anterior = cliente.fuente_ventas
+            cliente.fuente_ventas = fuente
+            _completar_defaults(cliente, fuente, dry_run=False)
+            click.echo(f"  {cliente.razon_social[:38]:<38} {anterior} -> {fuente}")
 
 
 @cli.command("cambiar-ambiente")
