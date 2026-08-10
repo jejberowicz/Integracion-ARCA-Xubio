@@ -540,14 +540,30 @@ def probar_afip(cuit: str) -> None:
 
         fuente = ComprobantesEnLinea()
         soap = fuente._cliente_soap(cliente.ambiente)
-        puntos = fuente.puntos_de_venta(soap, fuente._auth(creds))
+        configurados = (cliente.config_xubio or {}).get("puntos_venta")
+        puntos = fuente.puntos_de_venta(soap, fuente._auth(creds), configurados)
+
         if puntos:
-            click.echo(f"Puntos de venta habilitados: {', '.join(map(str, puntos))}")
-        else:
-            click.echo(
-                "Sin puntos de venta habilitados. Revisá que el certificado tenga "
-                "asociado el servicio 'Facturación Electrónica' en ARCA."
-            )
+            origen = "configurados a mano" if configurados else "informados por AFIP"
+            click.echo(f"Puntos de venta ({origen}): {', '.join(map(str, puntos))}")
+            return
+
+        click.echo(
+            "\nAFIP no informa ningún punto de venta habilitado para web service.\n"
+            "Esto NO es un problema del certificado: la autenticación funcionó.\n"
+            "\n"
+            "Pasa cuando el contribuyente factura por Comprobantes en Línea o por\n"
+            "controlador fiscal, porque esos puntos de venta son de otro tipo y\n"
+            "FEParamGetPtosVenta no los lista.\n"
+            "\n"
+            "Qué hacer:\n"
+            "  1. En ARCA, servicio 'Administración de puntos de venta y domicilios',\n"
+            "     mirá qué puntos de venta tiene y de qué sistema son.\n"
+            "  2. Si son de 'Comprobantes en Línea', cargalos igual y probá:\n"
+            f"       main.py mapear-punto-venta --cuit {cliente.cuit} --pto-vta N\n"
+            "     Algunos responden a la consulta aunque no estén habilitados a emitir.\n"
+            "  3. Si tampoco andan, ese cliente va por la fuente 'mis_comprobantes'."
+        )
 
 
 @cli.command("probar-xubio")
@@ -770,6 +786,33 @@ def analizar_xubio(cuit: str | None) -> None:
                         f"       main.py mapear-producto --cuit {cliente.cuit} "
                         f"--alicuota {tasa:g} --producto-id {por_tasa[tasa]['ID']}"
                     )
+
+
+@cli.command("mapear-punto-venta")
+@click.option("--cuit", required=True)
+@click.option("--pto-vta", "puntos", multiple=True, type=int, required=True, help="Repetible.")
+@click.option("--reemplazar", is_flag=True, help="Pisar la lista en vez de agregar.")
+def mapear_punto_venta(cuit: str, puntos: tuple[int, ...], reemplazar: bool) -> None:
+    """Carga a mano los puntos de venta a recorrer.
+
+    Hace falta cuando FEParamGetPtosVenta no devuelve nada, que es lo que pasa
+    si el contribuyente factura por Comprobantes en Línea o por controlador
+    fiscal: esos puntos de venta existen pero no están habilitados para web
+    service, y AFIP no los lista.
+    """
+    with get_session() as session:
+        cliente = _buscar_cliente(session, cuit)
+        if cliente is None:
+            raise click.ClickException(f"No existe el cliente {cuit}")
+
+        conf = dict(cliente.config_xubio or {})
+        actuales = [] if reemplazar else list(conf.get("puntos_venta") or [])
+        conf["puntos_venta"] = sorted({*actuales, *puntos})
+        cliente.config_xubio = conf
+        resultado = conf["puntos_venta"]
+
+    click.echo(f"{cliente.razon_social}: puntos de venta = {resultado}")
+    click.echo(f"Probalo con: main.py probar-afip --cuit {normalizar_cuit(cuit)}")
 
 
 @cli.command("mapear-producto")

@@ -72,7 +72,11 @@ class ComprobantesEnLinea(FuenteVentas):
         if self._soap is None:
             from zeep import Client
 
-            self._soap = Client(wsdl=config.WSFEV1_WSDL[ambiente])
+            from src.afip.transporte import transporte_zeep
+
+            self._soap = Client(
+                wsdl=config.WSFEV1_WSDL[ambiente], transport=transporte_zeep()
+            )
         return self._soap
 
     @staticmethod
@@ -113,16 +117,39 @@ class ComprobantesEnLinea(FuenteVentas):
         soap = self._cliente_soap(ambiente)
         auth = self._auth(creds)
 
-        for pto_vta in self.puntos_de_venta(soap, auth):
+        configurados = (cliente.config_xubio or {}).get("puntos_venta")
+        for pto_vta in self.puntos_de_venta(soap, auth, configurados):
             for tipo in self.tipos:
                 yield from self._recorrer(soap, auth, pto_vta, tipo, desde, hasta)
 
     # --- internos ---
 
-    def puntos_de_venta(self, soap, auth: dict) -> list[int]:
-        """Puntos de venta habilitados y no bloqueados del contribuyente."""
+    def puntos_de_venta(self, soap, auth: dict, configurados: list | None = None) -> list[int]:
+        """Puntos de venta a recorrer.
+
+        ``FEParamGetPtosVenta`` solo devuelve los habilitados **para web
+        service**. Un contribuyente que factura por Comprobantes en Línea o por
+        controlador fiscal no tiene ninguno, y AFIP responde 602 en vez de una
+        lista vacía. Por eso se pueden configurar a mano en
+        ``config_xubio['puntos_venta']``, que además evita la llamada.
+        """
+        if configurados:
+            return [int(p) for p in configurados]
+
         respuesta = soap.service.FEParamGetPtosVenta(Auth=auth)
-        self._chequear_errores(respuesta, "FEParamGetPtosVenta")
+        errores = getattr(respuesta, "Errors", None)
+        if errores and getattr(errores, "Err", None):
+            codigos = {int(e.Code) for e in errores.Err}
+            if codigos <= {602}:  # "Sin Resultados": no hay ninguno habilitado
+                log.warning(
+                    "El CUIT %s no tiene puntos de venta habilitados para web "
+                    "service. Si factura por Comprobantes en Línea, cargalos a "
+                    "mano con 'mapear-punto-venta'.",
+                    auth["Cuit"],
+                )
+                return []
+            self._chequear_errores(respuesta, "FEParamGetPtosVenta")
+
         resultado = getattr(respuesta, "ResultGet", None)
         if not resultado or not getattr(resultado, "PtoVenta", None):
             log.warning("El CUIT %s no tiene puntos de venta habilitados", auth["Cuit"])

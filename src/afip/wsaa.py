@@ -144,9 +144,11 @@ def _pedir_ta_a_afip(cms_b64: str, ambiente: str) -> str:
     from zeep import Client
     from zeep.exceptions import Fault
 
+    from src.afip.transporte import transporte_zeep
+
     wsdl = config.WSAA_WSDL[ambiente]
     try:
-        cliente_soap = Client(wsdl=wsdl)
+        cliente_soap = Client(wsdl=wsdl, transport=transporte_zeep())
         return cliente_soap.service.loginCms(in0=cms_b64)
     except Fault as exc:
         raise ErrorWSAA(f"WSAA rechazó el pedido: {_explicar(exc.message)}") from exc
