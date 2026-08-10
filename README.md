@@ -75,8 +75,12 @@ Autogestión Certificados Homologación**, pegando el texto del CSR en vez de
 subir el archivo. No son intercambiables con los de producción, y WSASS no es
 delegable (hay que entrar con la Clave Fiscal de la persona física).
 
-**AFIP, fuente `mis_comprobantes`** — solo el usuario (CUIT) y la Clave Fiscal
-del cliente. No hace falta certificado.
+**AFIP, fuente `mis_comprobantes`** — usuario y Clave Fiscal, sin certificado.
+
+El usuario es **siempre el CUIT de una persona física**: el de una empresa da
+"Número de CUIL/CUIT incorrecto" (verificado contra el portal). Para un cliente
+persona jurídica hay que cargar el CUIT de su titular o representante, y esa
+persona tiene que tener delegado *Mis Comprobantes* de la empresa.
 
 **Xubio** — en el panel de *cada empresa*: Configuración → API/Integraciones →
 crear una aplicación. Da un `client_id` y un `secret`. Son distintos por
@@ -364,10 +368,20 @@ El objetivo es que no haya nada que tipear ni que ejecutar a mano.
 **Las credenciales se cargan una sola vez** y quedan cifradas en la base:
 
 ```bash
-# La Clave Fiscal es una sola —la tuya— para todos los clientes.
-# Pide la contraseña sin mostrarla en pantalla.
-python main.py credencial-portal --usuario 20-11111111-9
+# Una por cliente. --usuario es el CUIT de la PERSONA FÍSICA que entra al
+# portal (el titular o representante), que rara vez coincide con el CUIT del
+# cliente. La contraseña se pide sin mostrarla en pantalla.
+python main.py credencial-fiscal --cuit 30-71234567-1 --usuario 20-12345678-6
+
+# Si varias empresas comparten representante, una sola carga alcanza:
+python main.py credencial-fiscal --cuit 30-71234567-1 --cuit 30-70123456-8 \
+  --usuario 20-12345678-6
 ```
+
+También se pueden cargar en lote desde la planilla, con las columnas
+`clave_fiscal_usuario` y `clave_fiscal_password`, y `alta-masiva --actualizar`.
+Tener veinte Claves Fiscales en un `.xlsx` en claro es un riesgo a considerar:
+en la base quedan cifradas, en la planilla no.
 
 Y después:
 

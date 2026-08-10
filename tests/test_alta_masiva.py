@@ -81,17 +81,29 @@ def test_dry_run_no_toca_nada():
     assert cliente.xubio_client_id is None
 
 
-def test_cambiar_a_mis_comprobantes_completa_el_usuario():
-    cliente = hacer_cliente()
+def test_una_empresa_no_completa_sola_el_usuario_del_portal():
+    # 30... es persona jurídica: su CUIT no sirve para entrar al portal, así
+    # que no se puede adivinar el usuario.
+    cliente = hacer_cliente(cuit="30712345671")
+    _actualizar_cliente(
+        cliente,
+        {"fuente": "mis_comprobantes", "clave_fiscal_password": "clave"},
+        FuenteVentas.MIS_COMPROBANTES,
+        dry_run=False,
+    )
+    assert cliente.clave_fiscal_usuario is None
+
+
+def test_una_persona_fisica_si_usa_su_propio_cuit():
+    cliente = hacer_cliente(cuit="20123456786")
     cambios = _actualizar_cliente(
         cliente,
         {"fuente": "mis_comprobantes", "clave_fiscal_password": "clave"},
         FuenteVentas.MIS_COMPROBANTES,
         dry_run=False,
     )
-    # El usuario de Clave Fiscal es el CUIT: sin esto choca contra el CHECK.
     assert "clave_fiscal_usuario" in cambios
-    assert cliente.clave_fiscal_usuario == "30712345671"
+    assert cliente.clave_fiscal_usuario == "20123456786"
 
 
 def test_cambiar_a_wsfe_completa_las_rutas_de_certificados():
@@ -110,8 +122,26 @@ def test_coherencia_rechaza_mis_comprobantes_sin_clave():
 
 
 def test_coherencia_acepta_si_la_clave_ya_estaba_cargada():
-    cliente = hacer_cliente(clave_fiscal_password="cifrado")
+    cliente = hacer_cliente(
+        cuit="20123456786", clave_fiscal_usuario="20123456786",
+        clave_fiscal_password="cifrado",
+    )
     assert _validar_coherencia(cliente, {}, "mis_comprobantes") is None
+
+
+def test_coherencia_exige_el_usuario_cuando_el_cliente_es_empresa():
+    cliente = hacer_cliente(cuit="30712345671", clave_fiscal_password="cifrado")
+    problema = _validar_coherencia(cliente, {}, "mis_comprobantes")
+    assert problema and "persona física que la representa" in problema
+
+
+def test_coherencia_rechaza_un_usuario_que_es_empresa():
+    cliente = hacer_cliente(
+        cuit="20123456786", clave_fiscal_usuario="30712345671",
+        clave_fiscal_password="cifrado",
+    )
+    problema = _validar_coherencia(cliente, {}, "mis_comprobantes")
+    assert problema and "solo acepta el de una persona física" in problema
 
 
 def test_coherencia_wsfe_siempre_pasa():

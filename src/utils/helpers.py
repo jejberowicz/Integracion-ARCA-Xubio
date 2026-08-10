@@ -31,3 +31,14 @@ def formatear_cuit(valor: str | int | None) -> str | None:
     if not cuit or len(cuit) != 11:
         return cuit
     return f"{cuit[:2]}-{cuit[2:10]}-{cuit[10]}"
+
+
+# Prefijos del CUIT: 20/23/24/27 identifican personas físicas, 30/33/34
+# personas jurídicas. Importa porque la Clave Fiscal de ARCA es siempre de una
+# persona física: el CUIT de una empresa no sirve como usuario del portal.
+PREFIJOS_PERSONA_FISICA = ("20", "23", "24", "27")
+
+
+def es_persona_fisica(valor: str | int | None) -> bool:
+    cuit = normalizar_cuit(valor)
+    return bool(cuit) and cuit[:2] in PREFIJOS_PERSONA_FISICA
