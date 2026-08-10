@@ -88,3 +88,35 @@ def test_ticket_incompleto_falla(certificado):
 
     with pytest.raises(ErrorWSAA, match="incompleta"):
         _parsear_ta("<loginTicketResponse><header/></loginTicketResponse>")
+
+
+# --- Mensajes de error accionables ---
+
+def test_computador_no_autorizado_explica_el_paso_que_falta():
+    from src.afip.wsaa import _explicar
+
+    ayuda = _explicar("Computador no autorizado a acceder al servicio")
+    assert "WebServices" in ayuda
+    assert "Facturación Electrónica" in ayuda
+    # El texto original de AFIP se conserva.
+    assert "Computador no autorizado" in ayuda
+
+
+def test_ta_vigente_explica_que_hay_que_esperar():
+    from src.afip.wsaa import _explicar
+
+    ayuda = _explicar("El CEE ya posee un TA valido para el acceso al WSN solicitado")
+    assert "12 horas" in ayuda
+
+
+def test_certificado_de_otro_ambiente():
+    from src.afip.wsaa import _explicar
+
+    ayuda = _explicar("Certificado no emitido por AC de confianza")
+    assert "homologación" in ayuda
+
+
+def test_un_error_desconocido_se_deja_como_vino():
+    from src.afip.wsaa import _explicar
+
+    assert _explicar("Algo raro pasó") == "Algo raro pasó"

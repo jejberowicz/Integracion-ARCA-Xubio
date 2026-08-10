@@ -102,6 +102,44 @@ def _parsear_ta(xml: str) -> tuple[str, str, dt.datetime]:
     return token, sign, expira_en.astimezone(dt.timezone.utc)
 
 
+# Errores de WSAA que tienen una causa concreta y una solución concreta.
+# El texto de AFIP es correcto pero no dice qué hacer, y son siempre los mismos.
+_AYUDA_POR_ERROR = (
+    (
+        "computador no autorizado",
+        "El certificado es válido pero no está asociado al servicio.\n"
+        "  En ARCA: Administrador de Relaciones -> Nueva Relación -> en 'Servicio'\n"
+        "  apretar Buscar -> WebServices -> 'Facturación Electrónica'\n"
+        "  (NO 'Servicios Interactivos', ni MTXCA, ni la de exportación),\n"
+        "  y como representante elegir el alias del certificado.",
+    ),
+    (
+        "ya posee un ta valido",
+        "AFIP ya entregó un Ticket de Acceso vigente y no da otro hasta que venza\n"
+        "  (duran 12 horas). Suele pasar si se borró la tabla tickets_acceso o se\n"
+        "  está corriendo contra otra base. Hay que esperar.",
+    ),
+    (
+        "certificado expirado",
+        "El certificado venció. Hay que emitir uno nuevo en 'Administración de\n"
+        "  Certificados Digitales' y volver a asociarle el servicio.",
+    ),
+    (
+        "certificado no emitido por ac de confianza",
+        "El certificado no lo emitió ARCA, o se está usando uno de homologación\n"
+        "  contra producción (o al revés). Los ambientes no son intercambiables.",
+    ),
+)
+
+
+def _explicar(mensaje: str) -> str:
+    texto = (mensaje or "").lower()
+    for patron, ayuda in _AYUDA_POR_ERROR:
+        if patron in texto:
+            return f"{mensaje}\n\n  {ayuda}"
+    return mensaje
+
+
 def _pedir_ta_a_afip(cms_b64: str, ambiente: str) -> str:
     from zeep import Client
     from zeep.exceptions import Fault
@@ -111,7 +149,7 @@ def _pedir_ta_a_afip(cms_b64: str, ambiente: str) -> str:
         cliente_soap = Client(wsdl=wsdl)
         return cliente_soap.service.loginCms(in0=cms_b64)
     except Fault as exc:
-        raise ErrorWSAA(f"WSAA rechazó el pedido: {exc.message}") from exc
+        raise ErrorWSAA(f"WSAA rechazó el pedido: {_explicar(exc.message)}") from exc
 
 
 def obtener_credenciales(
