@@ -1,20 +1,48 @@
-# Seguridad y Certificados
+# === Nada de esto puede entrar al repo ===
+# Los certificados y claves de ARCA, las Claves Fiscales y las credenciales de
+# Xubio dan acceso fiscal completo a los clientes del estudio.
+
+# Certificados y claves privadas, estén donde estén
 *.key
 *.csr
 *.crt
 *.pem
-.env
+*.p12
+*.pfx
 .certs/
 
-# Datos locales
+# Configuración con secretos (el .env.example sí se versiona)
+.env
+.env.*
+!.env.example
+
+# Datos locales: base con credenciales cifradas, CSV de ventas, perfiles de
+# navegador con sesiones de ARCA, capturas de diagnóstico y logs
 data/
 *.db
+*.sqlite
 *.sqlite3
+
+# Planillas de clientes: CUIT, razones sociales y a veces credenciales
+*.xlsx
+*.xlsm
+*.xls
+~$*
+
+# Descargas del portal
+*.zip
 
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
 .pytest_cache/
-*.egg-info/
+.ruff_cache/
+.mypy_cache/
+
+# Editores y sistema
+.vscode/
+.idea/
+.DS_Store
