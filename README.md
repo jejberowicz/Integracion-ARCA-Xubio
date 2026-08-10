@@ -37,20 +37,32 @@ python scripts/migrar_sqlite.py data/empresa_contable.db
 
 **AFIP, fuente `wsfe`** — por cada cliente hace falta un certificado digital:
 
-1. Generar la clave y el pedido de certificado (CSR) con el CUIT del cliente:
+1. Generar la clave y el CSR (o usar `scripts/generar_csr.py`, que lo hace para
+   toda la planilla):
    ```bash
-   openssl genrsa -out .certs/acme.key 2048
-   openssl req -new -key .certs/acme.key -subj "/C=AR/O=ACME SA/CN=carga-datos/serialNumber=CUIT 30712345671" -out .certs/acme.csr
+   openssl genrsa -out .certs/30712345671.key 2048
+   openssl req -new -key .certs/30712345671.key \
+     -subj "/C=AR/O=ACME SA/CN=carga-datos/serialNumber=CUIT 30712345671" \
+     -out .certs/30712345671.csr
    ```
-2. En ARCA con Clave Fiscal: *Administración de Certificados Digitales* → subir
-   el `.csr` → descargar el `.crt` a `.certs/`.
-3. En *Administrador de Relaciones de Clave Fiscal*, asociar el certificado al
-   servicio **Facturación Electrónica (wsfe)**. Sin este paso el certificado
-   autentica pero no devuelve puntos de venta.
+   ARCA valida `O` contra la razón social y `serialNumber` contra el CUIT.
+2. En ARCA con Clave Fiscal: *Administración de Certificados Digitales* →
+   **Agregar alias** → subir el `.csr` → descargar el `.crt` como
+   `.certs/<CUIT>.crt`.
+3. En *Administrador de Relaciones de Clave Fiscal* → **Nueva Relación** →
+   en "Servicio" apretar **Buscar** → **WebServices** → **Facturación
+   Electrónica**, y como representante elegir el alias del certificado.
+
+   **No está en "Servicios Interactivos"**: esa rama es la de los servicios con
+   pantalla web. WSFE es un web service y está en la rama *WebServices* del
+   mismo selector. Sin este paso el certificado autentica pero no devuelve
+   ningún punto de venta.
 4. Si trabajás como contador, el cliente tiene que **delegarte** el servicio.
 
-En homologación los certificados se sacan del portal de homologación, son
-distintos de los de producción.
+Homologación es otro circuito: los certificados se gestionan por **WSASS –
+Autogestión Certificados Homologación**, pegando el texto del CSR en vez de
+subir el archivo. No son intercambiables con los de producción, y WSASS no es
+delegable (hay que entrar con la Clave Fiscal de la persona física).
 
 **AFIP, fuente `mis_comprobantes`** — solo el usuario (CUIT) y la Clave Fiscal
 del cliente. No hace falta certificado.
