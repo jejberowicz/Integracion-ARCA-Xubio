@@ -30,6 +30,10 @@ class Resultado:
     subidos: int = 0
     fallidos: int = 0
     errores: list[str] = field(default_factory=list)
+    #: True cuando el fallo lo tiene que resolver una persona (captcha, 2FA,
+    #: un trámite pendiente en ARCA). En una corrida por cron es la diferencia
+    #: entre "reintentar mañana" y "andá a hacer algo".
+    requiere_atencion: bool = False
 
     @property
     def ok(self) -> bool:
@@ -194,6 +198,7 @@ def sincronizar_cliente(
             cliente.last_sync = dt.datetime.now(dt.timezone.utc)
     except Exception as exc:
         resultado.errores.append(f"{type(exc).__name__}: {exc}")
+        resultado.requiere_atencion = _necesita_una_persona(exc)
         log.exception("Error sincronizando %s", cliente.cuit)
     finally:
         bitacora.fin = dt.datetime.now(dt.timezone.utc)
@@ -206,6 +211,25 @@ def sincronizar_cliente(
         session.flush()
 
     return resultado
+
+
+def _necesita_una_persona(exc: Exception) -> bool:
+    """Distingue lo que se arregla solo de lo que hay que ir a resolver."""
+    from src.afip.mis_comprobantes import LoginAsistidoRequerido
+
+    if isinstance(exc, LoginAsistidoRequerido):
+        return True
+    # Trámites pendientes en ARCA: reintentar no los va a arreglar.
+    texto = str(exc).lower()
+    return any(
+        marca in texto
+        for marca in (
+            "computador no autorizado",
+            "no se encuentra habilitado a usar en el presente ws",
+            "certificado expirado",
+            "faltan las credenciales",
+        )
+    )
 
 
 def rango_por_defecto(cliente: Cliente, dias_atras: int = 31) -> tuple[dt.date, dt.date]:

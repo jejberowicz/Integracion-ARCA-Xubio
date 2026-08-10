@@ -16,6 +16,8 @@ from src.security import crypto
 from src.sync import clientes_activos, rango_por_defecto, sincronizar_cliente
 from src.utils.helpers import cuit_valido, formatear_cuit, normalizar_cuit
 
+log = logging.getLogger(__name__)
+
 
 def _configurar_logging(verbose: bool) -> None:
     logging.basicConfig(
@@ -40,6 +42,21 @@ def _cuit_opcion(valor: str) -> str:
             "Revisá que no falte o sobre un número."
         )
     return cuit
+
+
+def _credencial_portal(session) -> tuple[str, str] | None:
+    """La Clave Fiscal ya cargada, si hay alguna.
+
+    Es una sola credencial —la de la persona que entra al portal— compartida
+    por todos los clientes, así que alcanza con encontrarla en cualquiera.
+    """
+    fila = (
+        session.query(Cliente)
+        .filter(Cliente.clave_fiscal_password.isnot(None))
+        .filter(Cliente.clave_fiscal_usuario.isnot(None))
+        .first()
+    )
+    return (fila.clave_fiscal_usuario, fila.clave_fiscal_password) if fila else None
 
 
 def _buscar_cliente(session, cuit: str) -> Cliente | None:
@@ -474,9 +491,24 @@ def sync(
 
     click.echo("\n--- Resumen ---")
     for r in resultados:
-        click.echo(("OK  " if r.ok else "FALLA ") + r.resumen())
+        if r.ok:
+            marca = "OK       "
+        elif r.requiere_atencion:
+            marca = "REQUIERE ATENCIÓN "
+        else:
+            marca = "FALLA    "
+        click.echo(marca + r.resumen())
         for error in r.errores:
             click.echo(f"      {error}")
+
+    atencion = [r for r in resultados if r.requiere_atencion]
+    if atencion:
+        click.echo(
+            f"\n{len(atencion)} cliente(s) necesitan que resuelvas algo a mano; "
+            "reintentar solo no los va a destrabar:"
+        )
+        for r in atencion:
+            click.echo(f"  {r.cuit}")
 
     if any(not r.ok for r in resultados):
         sys.exit(1)
@@ -739,6 +771,62 @@ def activar(cuits: tuple[str, ...], solo: bool) -> None:
     click.echo(f"\nActivados: {len(activados)}. Desactivados: {len(desactivados)}.")
 
 
+@cli.command("credencial-portal")
+@click.option("--usuario", required=True, help="Tu CUIT (persona física) para entrar a ARCA.")
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    help="Clave Fiscal. Si se omite, se pide sin mostrarla en pantalla.",
+)
+@click.option(
+    "--solo-mis-comprobantes/--todos",
+    default=True,
+    help="Aplicar solo a los clientes que usan la fuente mis_comprobantes.",
+)
+def credencial_portal(usuario: str, password: str, solo_mis_comprobantes: bool) -> None:
+    """Carga tu Clave Fiscal una sola vez para todos los clientes.
+
+    El portal de ARCA se abre siempre con el CUIT de una persona física, y las
+    empresas se eligen como representado. Con una credencial alcanza para todos
+    los clientes que te hayan delegado el servicio.
+
+    La clave se guarda cifrada y no vuelve a pedirse: las corridas
+    automatizadas la leen de la base.
+    """
+    usuario = normalizar_cuit(usuario)
+    if not cuit_valido(usuario):
+        raise click.ClickException(
+            f"{usuario!r} no es un CUIT válido. Tiene que ser el de la persona "
+            "que entra al portal, no el de una empresa."
+        )
+
+    cifrada = crypto.cifrar(password)
+    alcanzados = []
+
+    with get_session() as session:
+        for cliente in session.query(Cliente).all():
+            if solo_mis_comprobantes and cliente.fuente_ventas != FuenteVentas.MIS_COMPROBANTES:
+                continue
+            cliente.clave_fiscal_usuario = usuario
+            cliente.clave_fiscal_password = cifrada
+            alcanzados.append(cliente.razon_social)
+
+    click.echo(f"Credencial de {formatear_cuit(usuario)} guardada para {len(alcanzados)} clientes.")
+    for nombre in alcanzados:
+        click.echo(f"  {nombre}")
+    if not alcanzados:
+        click.echo(
+            "Ningún cliente usa la fuente 'mis_comprobantes' todavía. "
+            "Pasalos con 'cambiar-fuente' y volvé a correr esto, o usá --todos."
+        )
+    else:
+        click.echo(
+            "\nNo hace falta volver a tipearla. Si cambiás la Clave Fiscal en ARCA, "
+            "corré este comando de nuevo y se actualiza en todos."
+        )
+
+
 @cli.command("cambiar-fuente")
 @click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
 @click.option("--fuente", type=click.Choice(FuenteVentas.TODAS), required=True)
@@ -756,6 +844,13 @@ def cambiar_fuente(
 
             if clave_fiscal_password:
                 cliente.clave_fiscal_password = crypto.cifrar(clave_fiscal_password)
+            elif fuente == FuenteVentas.MIS_COMPROBANTES and not cliente.clave_fiscal_password:
+                # Es una sola Clave Fiscal para todos: si ya está cargada en
+                # otro cliente, se reutiliza en vez de pedirla de nuevo.
+                compartida = _credencial_portal(session)
+                if compartida:
+                    cliente.clave_fiscal_usuario, cliente.clave_fiscal_password = compartida
+                    log.info("Reutilizando la credencial del portal ya cargada")
 
             problema = _validar_coherencia(cliente, {}, fuente)
             if problema:

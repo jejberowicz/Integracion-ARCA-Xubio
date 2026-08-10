@@ -356,3 +356,42 @@ acordarse.
 
 **WSFEv1 no lee los comprobantes hechos desde Comprobantes en Línea.** Ver la
 sección siguiente: es una limitación de AFIP, no del programa.
+
+## Corrida automatizada (cron)
+
+El objetivo es que no haya nada que tipear ni que ejecutar a mano.
+
+**Las credenciales se cargan una sola vez** y quedan cifradas en la base:
+
+```bash
+# La Clave Fiscal es una sola —la tuya— para todos los clientes.
+# Pide la contraseña sin mostrarla en pantalla.
+python main.py credencial-portal --usuario 20-11111111-9
+```
+
+Y después:
+
+```bash
+crontab -e
+# Todos los días a las 7
+0 7 * * * /home/joaco/Carga_Datos_Arca/scripts/sincronizar.sh
+```
+
+`scripts/sincronizar.sh` usa rutas absolutas (cron corre con un entorno mínimo),
+toma un lock para que dos corridas no se pisen, escribe en
+`data/logs/sync_AAAAMMDD.log` y borra los logs de más de 60 días.
+
+### Qué esperar en el resumen
+
+```
+OK                27123456780 [mis_comprobantes]: 42 descargados, 12 nuevos, 12 subidos
+REQUIERE ATENCIÓN 20123456786 [wsfe]: 0 descargados, 0 nuevos, 0 subidos
+FALLA             30712345671 [mis_comprobantes]: 8 descargados, 8 nuevos, 0 subidos, 8 fallidos
+```
+
+**REQUIERE ATENCIÓN** es distinto de **FALLA**: significa que reintentar no lo va
+a destrabar porque falta hacer algo a mano (un trámite en ARCA, un captcha, una
+credencial). Un **FALLA** suele resolverse solo en la corrida siguiente.
+
+Un cliente que falla no frena a los demás: cada uno se procesa por separado y el
+resumen los lista a todos.
