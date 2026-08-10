@@ -168,8 +168,17 @@ HTML e inventario de elementos de cada paso:
 python main.py scrapear --cuit 30712345671 --explorar
 ```
 
-Los archivos quedan en `data/descargas/.debug/<CUIT>/`. Con eso se ajustan los
-selectores sin tener que adivinar.
+Los archivos quedan en `data/descargas/.debug/<CUIT>/`:
+
+| Archivo | Qué tiene | ¿Se puede compartir? |
+|---|---|---|
+| `.txt` | inventario de elementos: ids, nombres, tipos, textos | **Sí**, es lo que hace falta para escribir selectores |
+| `.png` | captura de pantalla | Mirala antes: puede tener datos del contribuyente |
+| `.html` | HTML crudo, solo si se pide expresamente | **No**: lleva tokens de sesión y datos fiscales |
+
+El `.txt` no incluye el contenido de los campos —solo si están completos o no—
+ni el id de sesión de la URL. Está pensado para poder pasarlo sin revisarlo
+línea por línea.
 
 ### Salida manual
 

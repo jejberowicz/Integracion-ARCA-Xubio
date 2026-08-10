@@ -462,31 +462,67 @@ class Diagnostico:
     def __init__(self, carpeta: Path):
         self.carpeta = carpeta
 
-    def volcar(self, pagina, etiqueta: str) -> None:
+    def volcar(self, pagina, etiqueta: str, con_html: bool = False) -> None:
+        """Guarda el inventario de elementos y, opcionalmente, el HTML crudo.
+
+        El ``.txt`` es lo único pensado para compartir: describe la estructura
+        de la página sin valores. El HTML completo queda afuera salvo que se
+        pida expresamente, porque después del login contiene tokens de sesión y
+        datos fiscales del contribuyente.
+        """
         try:
             self.carpeta.mkdir(parents=True, exist_ok=True)
             marca = dt.datetime.now().strftime("%H%M%S")
             base = self.carpeta / f"{marca}_{etiqueta}"
-            pagina.screenshot(path=f"{base}.png", full_page=True)
-            (base.with_suffix(".html")).write_text(pagina.content(), encoding="utf-8")
+
             (base.with_suffix(".txt")).write_text(
-                f"URL: {pagina.url}\n\n{_inventario(pagina)}", encoding="utf-8"
+                f"URL: {_url_sin_sesion(pagina.url)}\n\n{_inventario(pagina)}",
+                encoding="utf-8",
             )
-            log.info("Diagnóstico guardado en %s.*", base)
+            pagina.screenshot(path=f"{base}.png", full_page=True)
+            if con_html:
+                (base.with_suffix(".html")).write_text(pagina.content(), encoding="utf-8")
+
+            log.info("Diagnóstico guardado en %s.txt (y .png)", base)
         except Exception as exc:  # pragma: no cover - el diagnóstico no debe romper
             log.warning("No se pudo guardar el diagnóstico: %s", exc)
 
 
+def _url_sin_sesion(url: str) -> str:
+    """Saca el jsessionid y cualquier token del querystring."""
+    url = re.sub(r";jsessionid=[^?#]*", ";jsessionid=<oculto>", url)
+    return re.sub(r"([?&](token|sign|password|clave)=)[^&]*", r"\1<oculto>", url, flags=re.I)
+
+
+# Atributos que pueden traer datos del contribuyente o de la sesión.
+_ATRIBUTOS_SENSIBLES = ("value",)
+
+
 def _inventario(pagina) -> str:
-    """Lista los elementos con los que se puede interactuar en la página."""
+    """Describe los elementos con los que se puede interactuar en la página.
+
+    Pensado para compartir: se listan identificadores y tipos, que es lo que
+    hace falta para escribir selectores, pero **no** los valores, que en un
+    portal fiscal son datos del contribuyente. Los campos de contraseña se
+    marcan sin tocar su contenido.
+    """
     lineas = []
     for selector in ("input", "select", "button", "a"):
         for el in pagina.query_selector_all(selector)[:80]:
             datos = {
                 k: el.get_attribute(k)
-                for k in ("id", "name", "type", "value", "href", "class", "placeholder")
+                for k in ("id", "name", "type", "href", "class", "placeholder")
             }
             datos = {k: v for k, v in datos.items() if v}
+
+            # Se informa si el campo tiene contenido, no cuál es.
+            if selector == "input":
+                valor = el.get_attribute("value")
+                if valor:
+                    datos["value"] = "<con contenido>"
+                if (datos.get("type") or "").lower() == "password":
+                    datos["value"] = "<contraseña>"
+
             texto = (el.inner_text() or "").strip()[:60] if selector != "input" else ""
             if datos or texto:
                 lineas.append(f"<{selector}> {texto!r} {datos}")
