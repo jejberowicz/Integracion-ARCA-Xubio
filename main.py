@@ -647,6 +647,39 @@ def activar(cuits: tuple[str, ...], solo: bool) -> None:
     click.echo(f"\nActivados: {len(activados)}. Desactivados: {len(desactivados)}.")
 
 
+@cli.command("cambiar-ambiente")
+@click.option("--cuit", "cuits", multiple=True, help="Repetible. Vacío = todos los activos.")
+@click.option("--ambiente", type=click.Choice(Ambiente.TODOS), required=True)
+def cambiar_ambiente(cuits: tuple[str, ...], ambiente: str) -> None:
+    """Cambia entre homologación y producción.
+
+    Son entornos separados con certificados distintos: el de uno no sirve en el
+    otro. El Ticket de Acceso se cachea por ambiente, así que no hay que
+    limpiarlo a mano.
+    """
+    with get_session() as session:
+        if cuits:
+            objetivo = [c for c in (_buscar_cliente(session, x) for x in cuits) if c]
+        else:
+            objetivo = clientes_activos(session)
+
+        if not objetivo:
+            raise click.ClickException("No se encontró ningún cliente.")
+
+        for cliente in objetivo:
+            anterior = cliente.ambiente
+            cliente.ambiente = ambiente
+            marca = "=" if anterior == ambiente else "->"
+            click.echo(f"  {cliente.razon_social[:38]:<38} {anterior} {marca} {ambiente}")
+
+    if ambiente == Ambiente.PRODUCCION:
+        click.echo(
+            "\nOjo: los certificados de homologación no sirven en producción. "
+            "Hay que emitirlos de nuevo desde 'Administración de Certificados "
+            "Digitales' y asociar el servicio de Facturación Electrónica."
+        )
+
+
 @cli.command("desactivar")
 @click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
 def desactivar(cuits: tuple[str, ...]) -> None:
