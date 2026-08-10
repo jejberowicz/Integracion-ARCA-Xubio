@@ -22,7 +22,7 @@ def hacer_comprobante(**kwargs) -> Comprobante:
         moneda="PES",
         cotizacion=Decimal("1"),
         doc_tipo=80,
-        doc_nro="30712345678",
+        doc_nro="30712345671",
         receptor_nombre="ACME S.A.",
         alicuotas_iva=[{"id": 5, "base_imp": "10000.00", "importe": "2100.00"}],
         fuente="wsfe",
@@ -97,11 +97,47 @@ def test_receptor_consumidor_final():
     datos = datos_cliente_xubio(
         hacer_comprobante(doc_tipo=99, doc_nro="0", receptor_nombre=None)
     )
-    assert datos["categoriaFiscal"] == "CONSUMIDOR_FINAL"
-    assert datos["CUIT"] is None
+    assert datos["categoriaFiscal"] == {"ID": 6}
+    assert "CUIT" not in datos
 
 
 def test_receptor_con_cuit():
     datos = datos_cliente_xubio(hacer_comprobante())
-    assert datos["CUIT"] == "30712345678"
+    # Xubio guarda el CUIT formateado con guiones.
+    assert datos["CUIT"] == "30-71234567-1"
+    assert datos["identificacionTributaria"] == {"ID": 9}
     assert datos["nombre"] == "ACME S.A."
+
+
+def test_el_nombre_se_recorta_a_lo_que_acepta_xubio():
+    largo = "ASOCIACION DEMO DE BUENOS AIRES"
+    datos = datos_cliente_xubio(hacer_comprobante(receptor_nombre=largo))
+    assert len(datos["nombre"]) == 30
+    assert datos["nombre"] == "ASOCIACION DEMO"
+
+
+def test_el_producto_va_como_numero():
+    # config_xubio guarda los IDs como texto; Xubio los quiere enteros.
+    items = armar_payload(
+        hacer_comprobante(), cliente_xubio_id=1, producto_id="1000001"
+    )["transaccionProductoItems"]
+    assert items[0]["producto"]["ID"] == 1000001
+
+
+def test_la_cotizacion_uno_va_como_entero():
+    # Con 1.0 Xubio rechaza: "La cotización para moneda principal no puede ser
+    # distinta de 1".
+    payload = armar_payload(hacer_comprobante(), cliente_xubio_id=1, producto_id=1)
+    assert payload["cotizacion"] == 1
+    assert isinstance(payload["cotizacion"], int)
+
+
+def test_una_cotizacion_real_conserva_los_decimales():
+    from decimal import Decimal as D
+
+    payload = armar_payload(
+        hacer_comprobante(moneda="DOL", cotizacion=D("1350.75")),
+        cliente_xubio_id=1, producto_id=1,
+    )
+    assert payload["cotizacion"] == 1350.75
+    assert payload["moneda"] == {"ID": -3}

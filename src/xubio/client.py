@@ -56,7 +56,7 @@ class XubioClient:
 
         self._token: str | None = None
         self._token_expira: dt.datetime | None = None
-        self._cache_clientes: dict[str, Any] = {}
+        self._por_cuit: dict[str, Any] | None = None
         self._puntos_venta: dict[int, Any] | None = None
         self._existentes: dict[str, Any] | None = None
         self._desde_cuando: str | None = None
@@ -131,17 +131,28 @@ class XubioClient:
                 time.sleep(ESPERA_REINTENTO * intento)
                 continue
 
-            # Token vencido: se fuerza la renovación y se reintenta.
-            # Un token malformado da 401, pero la documentación describe además
-            # un cuerpo {"error":"invalid_token","error_description":"token
-            # died"} sin garantizar el código de estado, así que se contemplan
-            # las dos formas.
+            # Xubio devuelve los errores de validación con estado 401 y el
+            # motivo en 'description'. Reintentarlos no sirve, y en un POST es
+            # peligroso: si la operación llegó a impactar, el reintento
+            # duplicaría el comprobante.
+            motivo = _motivo_funcional(respuesta)
+            if motivo:
+                raise ErrorXubio(f"{metodo} {ruta} -> {motivo}")
+
             if respuesta.status_code == 401 or _token_muerto(respuesta):
                 self._token = None
                 ultimo_error = ErrorAutenticacionXubio(respuesta.text[:300])
                 continue
 
             if respuesta.status_code == 429 or respuesta.status_code >= 500:
+                # Un POST no se reintenta a ciegas: no hay forma de saber si el
+                # comprobante se creó antes del error.
+                if metodo == "POST":
+                    raise ErrorXubio(
+                        f"POST {ruta} -> HTTP {respuesta.status_code}. No se "
+                        "reintenta para no arriesgar un duplicado; revisá en "
+                        f"Xubio si quedó creado. {respuesta.text[:200]}"
+                    )
                 espera = ESPERA_REINTENTO * intento
                 log.warning(
                     "Xubio respondió %s, reintentando en %ss", respuesta.status_code, espera
@@ -172,23 +183,43 @@ class XubioClient:
 
     # --- Maestros ---
 
-    def buscar_cliente(self, cuit: str | None, nombre: str | None) -> Any | None:
-        """Busca el receptor en Xubio por CUIT y, si no hay, por nombre exacto."""
-        clave = cuit or (nombre or "").strip().lower()
-        if clave in self._cache_clientes:
-            return self._cache_clientes[clave]
+    def _indice_por_cuit(self) -> dict[str, Any]:
+        """Índice CUIT -> id de cliente en Xubio.
 
-        resultado = None
-        if cuit:
-            candidatos = self.get(RUTA_CLIENTES, params={"identificacionTributaria": cuit})
-            resultado = _primer_elemento(candidatos)
+        La API **ignora** los filtros por CUIT (``?identificacionTributaria=``,
+        ``?CUIT=`` y ``?codigo=`` devuelven la lista completa), y el listado no
+        trae el CUIT: solo id y nombre. El único filtro que funciona es
+        ``?nombre=``, que no sirve porque Xubio recorta los nombres a 30
+        caracteres y no coinciden con los de AFIP.
 
-        if resultado is None and nombre:
-            candidatos = self.get(RUTA_CLIENTES, params={"nombre": nombre})
-            resultado = _primer_elemento(candidatos)
+        Así que el índice se arma pidiendo el detalle de cada cliente una vez
+        por corrida. Es lento, pero es la única forma de identificar al receptor
+        con certeza, y equivocarse acá significa facturarle a otro.
+        """
+        if self._por_cuit is None:
+            from src.utils.helpers import normalizar_cuit
 
-        self._cache_clientes[clave] = resultado
-        return resultado
+            self._por_cuit = {}
+            listado = self.get(RUTA_CLIENTES) or []
+            log.info("Indexando %s clientes de Xubio por CUIT", len(listado))
+            for resumen in listado:
+                identificador = _id_de(resumen)
+                if identificador is None:
+                    continue
+                detalle = self.get(f"{RUTA_CLIENTES}/{identificador}") or {}
+                cuit = normalizar_cuit(detalle.get("CUIT") or detalle.get("cuit"))
+                if cuit:
+                    self._por_cuit[cuit] = identificador
+        return self._por_cuit
+
+    def buscar_cliente_por_cuit(self, cuit: str | None) -> Any | None:
+        """Id del cliente en Xubio para ese CUIT, o None si no está."""
+        from src.utils.helpers import normalizar_cuit
+
+        normalizado = normalizar_cuit(cuit)
+        if not normalizado:
+            return None
+        return self._indice_por_cuit().get(normalizado)
 
     def productos_conocidos(self) -> list[dict]:
         """Catálogo de productos deducido de los comprobantes ya cargados.
@@ -285,15 +316,21 @@ class XubioClient:
             if configurado:
                 return configurado
 
-        existente = self.buscar_cliente(datos.get("CUIT"), datos.get("nombre"))
-        if existente is not None:
-            return _id_de(existente)
+        from src.utils.helpers import normalizar_cuit
 
-        log.info("Creando cliente en Xubio: %s", datos.get("nombre"))
+        existente = self.buscar_cliente_por_cuit(cbte.doc_nro)
+        if existente is not None:
+            return existente
+
+        log.info("Creando cliente en Xubio: %s (%s)", datos.get("nombre"), cbte.doc_nro)
         creado = self.post(RUTA_CLIENTES, datos)
         nuevo_id = _id_de(creado)
-        clave = datos.get("CUIT") or (datos.get("nombre") or "").strip().lower()
-        self._cache_clientes[clave] = creado
+        if nuevo_id is None:
+            raise ErrorXubio(f"Xubio no devolvió el id del cliente creado: {creado}")
+
+        cuit = normalizar_cuit(cbte.doc_nro)
+        if cuit and self._por_cuit is not None:
+            self._por_cuit[cuit] = nuevo_id
         return nuevo_id
 
     # --- Comprobantes ---
@@ -366,6 +403,26 @@ class XubioClient:
         if xubio_id is None:
             raise ErrorXubio(f"Xubio no devolvió un ID para {cbte}: {respuesta}")
         return str(xubio_id)
+
+
+def _motivo_funcional(respuesta: requests.Response) -> str | None:
+    """Extrae el motivo de un rechazo de negocio de Xubio.
+
+    Los errores de validación llegan con estado 401 y un cuerpo que trae la
+    explicación en 'description', enterrada bajo un stack trace de Java. Sin
+    esto el usuario ve el stack trace y no el motivo.
+    """
+    if b"description" not in respuesta.content:
+        return None
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        return None
+    descripcion = cuerpo.get("description")
+    if not descripcion:
+        return None
+    codigo = cuerpo.get("codeResponse") or respuesta.status_code
+    return f"Xubio rechazó la operación ({codigo}): {descripcion}"
 
 
 def _token_muerto(respuesta: requests.Response) -> bool:

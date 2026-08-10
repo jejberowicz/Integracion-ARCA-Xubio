@@ -8,6 +8,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from src.utils.helpers import formatear_cuit
 from src.afip.tablas import (
     NOTAS_DE_CREDITO,
     TIPOS_COMPROBANTE,
@@ -118,6 +119,24 @@ def resolver_producto(
     return producto_default
 
 
+def _cotizacion(valor) -> float | int:
+    """Xubio valida la cotización de la moneda principal contra el entero 1.
+
+    Mandar 1.0 hace que rechace el comprobante con "La cotización para moneda
+    principal no puede ser distinta de 1", así que los valores enteros van sin
+    parte decimal.
+    """
+    numero = Decimal(str(valor if valor is not None else 1))
+    return int(numero) if numero == numero.to_integral_value() else float(numero)
+
+
+def _id_numerico(valor):
+    """Los IDs de Xubio son enteros; la configuración los guarda como texto."""
+    if isinstance(valor, str) and valor.lstrip("-").isdigit():
+        return int(valor)
+    return valor
+
+
 def _linea(producto_id, descripcion: str, neto: Decimal, iva: Decimal) -> dict:
     """Renglón de ``transaccionProductoItems``, con los campos que usa Xubio.
 
@@ -130,7 +149,7 @@ def _linea(producto_id, descripcion: str, neto: Decimal, iva: Decimal) -> dict:
     """
     base = float(neto)
     return {
-        "producto": {"ID": producto_id},
+        "producto": {"ID": _id_numerico(producto_id)},
         "descripcion": descripcion,
         "cantidad": 1.0,
         "precio": base,
@@ -215,7 +234,7 @@ def armar_payload(
         "fecha": cbte.fecha.isoformat(),
         "fechaVto": (cbte.fecha_vto_cae or cbte.fecha).isoformat(),
         "moneda": {"ID": moneda_xubio(cbte.moneda)},
-        "cotizacion": float(cbte.cotizacion or 1),
+        "cotizacion": _cotizacion(cbte.cotizacion),
         "importeGravado": float(cbte.imp_neto),
         "importeImpuestos": float(cbte.imp_iva + cbte.imp_trib),
         "importetotal": float(cbte.imp_total),
@@ -229,16 +248,32 @@ def armar_payload(
     return payload
 
 
+# Maestros de Xubio verificados leyendo un cliente real de la API.
+IDENTIFICACION_CUIT = 9
+CATEGORIA_CONSUMIDOR_FINAL = 6
+CATEGORIA_EXENTO = 5
+
+# Xubio recorta los nombres de cliente a 30 caracteres.
+LARGO_NOMBRE_CLIENTE = 30
+
+
 def datos_cliente_xubio(cbte: Comprobante) -> dict:
-    """Datos mínimos para dar de alta al receptor en Xubio si no existe."""
+    """Datos para dar de alta al receptor en Xubio si no existe.
+
+    El CUIT viaja formateado con guiones, que es como lo devuelve la API.
+    """
     if es_consumidor_final(cbte.doc_tipo, cbte.doc_nro):
+        nombre = (cbte.receptor_nombre or "Consumidor Final")[:LARGO_NOMBRE_CLIENTE]
         return {
-            "nombre": cbte.receptor_nombre or "Consumidor Final",
-            "CUIT": None,
-            "categoriaFiscal": "CONSUMIDOR_FINAL",
+            "nombre": nombre,
+            "razonSocial": nombre,
+            "categoriaFiscal": {"ID": CATEGORIA_CONSUMIDOR_FINAL},
         }
+
+    nombre = (cbte.receptor_nombre or f"CUIT {cbte.doc_nro}")[:LARGO_NOMBRE_CLIENTE]
     return {
-        "nombre": cbte.receptor_nombre or f"CUIT {cbte.doc_nro}",
-        "CUIT": cbte.doc_nro,
-        "identificacionTributaria": cbte.doc_nro,
+        "nombre": nombre,
+        "razonSocial": nombre,
+        "CUIT": formatear_cuit(cbte.doc_nro),
+        "identificacionTributaria": {"ID": IDENTIFICACION_CUIT},
     }

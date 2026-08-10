@@ -95,3 +95,33 @@ def test_expires_in_como_texto_no_rompe(cliente, monkeypatch):
         lambda url, **kw: respuesta(200, b'{"access_token":"T1","expires_in":"3600"}'),
     )
     assert xubio.autenticar() == "T1"
+
+
+# --- Errores de negocio disfrazados de 401 ---
+
+def test_extrae_el_motivo_del_rechazo():
+    from src.xubio.client import _motivo_funcional
+
+    cuerpo = (
+        b'{"description":"La cotizacion para moneda principal no puede ser '
+        b'distinta de 1","codeResponse":400,"stackTrace":[{"methodName":"post"}]}'
+    )
+    # Xubio lo manda con 401 aunque sea un error de validación.
+    motivo = _motivo_funcional(respuesta(401, cuerpo))
+    assert motivo and "cotizacion para moneda principal" in motivo
+    assert "400" in motivo
+
+
+def test_una_respuesta_normal_no_es_un_rechazo():
+    from src.xubio.client import _motivo_funcional
+
+    assert _motivo_funcional(respuesta(200, b'[{"cliente_id":1}]')) is None
+    assert _motivo_funcional(respuesta(401, b'{"error":"invalid_token"}')) is None
+
+
+def test_el_token_muerto_no_se_confunde_con_un_rechazo():
+    from src.xubio.client import _motivo_funcional, _token_muerto
+
+    cuerpo = b'{"error":"invalid_token","error_description":"token died"}'
+    assert _token_muerto(respuesta(401, cuerpo))
+    assert _motivo_funcional(respuesta(401, cuerpo)) is None
