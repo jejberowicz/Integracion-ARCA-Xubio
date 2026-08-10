@@ -255,3 +255,18 @@ Antes de pegar credenciales: seleccionar la columna → Formato de celdas →
 **Texto**. `alta-masiva` detecta el patrón y rechaza la fila en vez de guardar
 una credencial rota que después falla con un error de autenticación difícil de
 rastrear.
+
+## Trabajar con un subconjunto de clientes
+
+`sync` y `analizar-xubio` procesan solo los clientes activos, así que se puede
+poner en marcha de a poco sin borrar nada:
+
+```bash
+# Dejar activos únicamente estos dos
+python main.py activar --cuit 27123456780 --cuit 20123456786 --solo
+
+python main.py desactivar --cuit 30701234568
+```
+
+Los inactivos quedan en la base con toda su configuración; volver a activarlos
+es un comando.

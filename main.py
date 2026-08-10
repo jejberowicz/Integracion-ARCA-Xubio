@@ -612,6 +612,59 @@ def probar_xubio(
             click.echo(json.dumps(datos, ensure_ascii=False, indent=2)[:4000])
 
 
+@cli.command("activar")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option(
+    "--solo",
+    is_flag=True,
+    help="Además, desactivar todos los demás. Útil para probar con unos pocos.",
+)
+def activar(cuits: tuple[str, ...], solo: bool) -> None:
+    """Marca clientes como activos. 'sync' solo procesa los activos."""
+    objetivo = {normalizar_cuit(c) for c in cuits}
+
+    with get_session() as session:
+        faltantes = objetivo - {
+            c.cuit for c in session.query(Cliente).filter(Cliente.cuit.in_(objetivo))
+        }
+        if faltantes:
+            raise click.ClickException(f"No existen estos CUIT: {sorted(faltantes)}")
+
+        activados, desactivados = [], []
+        for cliente in session.query(Cliente).all():
+            deberia = cliente.cuit in objetivo
+            if deberia and not cliente.activo:
+                cliente.activo = True
+                activados.append(cliente.razon_social)
+            elif solo and not deberia and cliente.activo:
+                cliente.activo = False
+                desactivados.append(cliente.razon_social)
+
+    for nombre in activados:
+        click.echo(f"  activado    {nombre}")
+    for nombre in desactivados:
+        click.echo(f"  desactivado {nombre}")
+    click.echo(f"\nActivados: {len(activados)}. Desactivados: {len(desactivados)}.")
+
+
+@cli.command("desactivar")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+def desactivar(cuits: tuple[str, ...]) -> None:
+    """Saca clientes de la sincronización sin borrarlos."""
+    objetivo = {normalizar_cuit(c) for c in cuits}
+    tocados = []
+
+    with get_session() as session:
+        for cliente in session.query(Cliente).filter(Cliente.cuit.in_(objetivo)):
+            if cliente.activo:
+                cliente.activo = False
+                tocados.append(cliente.razon_social)
+
+    for nombre in tocados:
+        click.echo(f"  desactivado {nombre}")
+    click.echo(f"Desactivados: {len(tocados)}.")
+
+
 @cli.command("analizar-xubio")
 @click.option("--cuit", help="Un cliente. Por defecto, todos los que tengan credenciales.")
 def analizar_xubio(cuit: str | None) -> None:
