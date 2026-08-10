@@ -110,10 +110,11 @@ def test_receptor_con_cuit():
 
 
 def test_el_nombre_se_recorta_a_lo_que_acepta_xubio():
-    largo = "ASOCIACION DEMO DE BUENOS AIRES"
+    # Xubio corta los nombres de cliente en 30 caracteres.
+    largo = "COOPERATIVA DE TRABAJO Y SERVICIOS DEL SUR LIMITADA"
     datos = datos_cliente_xubio(hacer_comprobante(receptor_nombre=largo))
+    assert datos["nombre"] == largo[:30]
     assert len(datos["nombre"]) == 30
-    assert datos["nombre"] == "ASOCIACION DEMO"
 
 
 def test_el_producto_va_como_numero():

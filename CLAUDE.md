@@ -143,9 +143,13 @@ acá parece raro, es porque la realidad es rara.
 | GOMEZ JUAN CARLOS (20123456786) | Xubio OK, producto 1000002. Monotributista, todo Factura C |
 | Los otros 17 | Inactivos, sin credenciales |
 
-La Clave Fiscal de GOMEZ (20123456786) cubre además a OTRA EMPRESA S.R.L.,
-TERCERA EMPRESA S R L y SUCESION DE GOMEZ PASQUALE, que **no están** en la
-planilla.
+Una misma Clave Fiscal suele cubrir varias empresas: la del tercer cliente
+representa a otras tres que **no están** en la planilla. Conviene correr
+`representados` antes de salir a pedir credenciales cliente por cliente.
+
+> Los nombres y CUIT de este archivo son ficticios. El repositorio no lleva
+> datos reales de clientes: son de un estudio contable y están alcanzados por el
+> secreto profesional.
 
 ---
 
