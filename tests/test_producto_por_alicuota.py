@@ -47,8 +47,9 @@ def test_cada_linea_va_contra_su_producto():
         cbte, cliente_xubio_id=1, producto_id="DEFAULT", productos_por_alicuota=MAPA
     )["transaccionProductoItems"]
 
+    # El importe de IVA en pesos, no el porcentaje.
     porproducto = {i["producto"]["ID"]: i["iva"] for i in items}
-    assert porproducto == {"P21": 21.0, "P105": 10.5}
+    assert porproducto == {"P21": 210.0, "P105": 105.0}
 
 
 def test_no_gravado_y_exento_usan_el_producto_de_cero():

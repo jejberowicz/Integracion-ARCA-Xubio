@@ -118,21 +118,26 @@ def resolver_producto(
     return producto_default
 
 
-def _linea(producto_id, descripcion: str, importe: Decimal, iva: float) -> dict:
+def _linea(producto_id, descripcion: str, neto: Decimal, iva: Decimal) -> dict:
     """Renglón de ``transaccionProductoItems``, con los campos que usa Xubio.
 
-    ``iva`` es el porcentaje (21.0, 10.5, 0.0) y ``montoExento`` el importe que
-    no tributa; para las líneas gravadas va en cero.
+    Ojo con ``iva``: es el **importe en pesos**, no el porcentaje. Verificado
+    contra comprobantes reales, donde la tasa siempre da ``iva / importe``
+    (360000 de neto llevan 75600 de IVA, que es el 21 %).
+
+    ``montoExento`` va en cero incluso en los renglones exentos: en los datos
+    reales nunca aparece con valor.
     """
-    neto = float(importe)
+    base = float(neto)
     return {
         "producto": {"ID": producto_id},
         "descripcion": descripcion,
         "cantidad": 1.0,
-        "precio": neto,
-        "importe": neto,
-        "iva": iva,
-        "montoExento": 0.0 if iva else neto,
+        "precio": base,
+        "importe": base,
+        "iva": float(iva),
+        "total": base + float(iva),
+        "montoExento": 0.0,
         "porcentajeDescuento": 0.0,
     }
 
@@ -157,27 +162,28 @@ def _items_desde_alicuotas(
                 resolver_producto(alic_id, producto_id, productos_por_alicuota),
                 descripcion,
                 Decimal(str(alicuota["base_imp"])),
-                float(porcentaje_iva(alic_id)),
+                Decimal(str(alicuota["importe"])),
             )
         )
 
     # No gravado y exento van sin IVA: se usa el producto mapeado al 0 %.
     producto_sin_iva = resolver_producto(3, producto_id, productos_por_alicuota)
+    cero = Decimal("0")
 
     if cbte.imp_tot_conc and cbte.imp_tot_conc != 0:
         items.append(
-            _linea(producto_sin_iva, f"{descripcion} - No gravado", cbte.imp_tot_conc, 0)
+            _linea(producto_sin_iva, f"{descripcion} - No gravado", cbte.imp_tot_conc, cero)
         )
 
     if cbte.imp_op_ex and cbte.imp_op_ex != 0:
         items.append(
-            _linea(producto_sin_iva, f"{descripcion} - Exento", cbte.imp_op_ex, 0)
+            _linea(producto_sin_iva, f"{descripcion} - Exento", cbte.imp_op_ex, cero)
         )
 
     if not items:
         # Comprobante sin desglose utilizable: se manda el neto como una línea.
         items.append(
-            _linea(producto_sin_iva, descripcion, cbte.imp_neto or cbte.imp_total, 0)
+            _linea(producto_sin_iva, descripcion, cbte.imp_neto or cbte.imp_total, cero)
         )
 
     return items

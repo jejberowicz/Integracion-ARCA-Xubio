@@ -213,6 +213,56 @@ class XubioClient:
                     }
         return sorted(vistos.values(), key=lambda p: str(p.get("nombre") or ""))
 
+    def radiografia(self, limite: int = 100) -> dict:
+        """Resume cómo viene facturando la empresa en Xubio.
+
+        Sirve para decidir la configuración sin adivinar: qué productos usa de
+        verdad (no los que tiene dados de alta), con qué alícuotas y con qué
+        letras de comprobante.
+        """
+        from collections import Counter
+
+        resumen = {
+            "comprobantes": 0,
+            "letras": Counter(),
+            "alicuotas": Counter(),
+            "productos": {},
+            "desde": None,
+            "hasta": None,
+        }
+
+        listado = (self.get(RUTA_COMPROBANTE_VENTA) or [])[:limite]
+        resumen["comprobantes"] = len(listado)
+        if not listado:
+            return resumen
+
+        fechas = [v.get("fecha") for v in listado if v.get("fecha")]
+        resumen["desde"], resumen["hasta"] = min(fechas, default=None), max(fechas, default=None)
+
+        for vista in listado:
+            resumen["letras"][(vista.get("numeroDocumento") or "?")[:1]] += 1
+            transaccion = _id_de(vista)
+            if transaccion is None:
+                continue
+            detalle = self.get(f"{RUTA_COMPROBANTE_VENTA}/{transaccion}")
+            for item in (detalle or {}).get("transaccionProductoItems") or []:
+                producto = item.get("producto") or {}
+                pid = _id_de(producto)
+                if pid is None:
+                    continue
+                # 'iva' es el importe en pesos: la tasa sale de dividir.
+                base = float(item.get("importe") or 0)
+                monto_iva = float(item.get("iva") or 0)
+                tasa = round(monto_iva / base * 100, 2) if base else 0.0
+                resumen["alicuotas"][tasa] += 1
+                ficha = resumen["productos"].setdefault(
+                    pid, {"ID": pid, "nombre": producto.get("nombre"), "usos": 0, "ivas": set()}
+                )
+                ficha["usos"] += 1
+                ficha["ivas"].add(tasa)
+
+        return resumen
+
     def punto_venta_id(self, pto_vta: int) -> Any | None:
         """Traduce el número de punto de venta de AFIP al ID interno de Xubio."""
         if self._puntos_venta is None:

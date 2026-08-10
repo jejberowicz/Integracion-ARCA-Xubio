@@ -612,6 +612,80 @@ def probar_xubio(
             click.echo(json.dumps(datos, ensure_ascii=False, indent=2)[:4000])
 
 
+@cli.command("analizar-xubio")
+@click.option("--cuit", help="Un cliente. Por defecto, todos los que tengan credenciales.")
+def analizar_xubio(cuit: str | None) -> None:
+    """Muestra cómo viene facturando cada empresa en Xubio.
+
+    Dice qué productos usa realmente, con qué alícuotas y con qué letras, que es
+    lo que hace falta para decidir el mapeo sin adivinar.
+    """
+    from src.xubio.client import ErrorXubio, XubioClient
+
+    with get_session() as session:
+        if cuit:
+            objetivo = [c for c in [_buscar_cliente(session, cuit)] if c]
+            if not objetivo:
+                raise click.ClickException(f"No existe el cliente {cuit}")
+        else:
+            objetivo = [
+                c for c in clientes_activos(session)
+                if c.xubio_client_id and c.xubio_secret_id
+            ]
+
+        if not objetivo:
+            raise click.ClickException(
+                "Ningún cliente tiene credenciales de Xubio cargadas todavía."
+            )
+
+        for cliente in objetivo:
+            click.echo(f"\n{cliente.razon_social}  ({formatear_cuit(cliente.cuit)})")
+            try:
+                datos = XubioClient(cliente).radiografia()
+            except ErrorXubio as exc:
+                click.echo(f"  ERROR: {exc}")
+                continue
+
+            if not datos["comprobantes"]:
+                click.echo("  Sin comprobantes cargados en Xubio todavía.")
+                continue
+
+            letras = ", ".join(f"{l} x{n}" for l, n in datos["letras"].most_common())
+            click.echo(
+                f"  {datos['comprobantes']} comprobantes "
+                f"({datos['desde']} a {datos['hasta']}) | letras: {letras}"
+            )
+            for p in sorted(datos["productos"].values(), key=lambda x: -x["usos"]):
+                ivas = ", ".join(f"{i:g}%" for i in sorted(p["ivas"]))
+                click.echo(
+                    f"    producto {p['ID']}  {str(p['nombre'])[:32]:<32} "
+                    f"{p['usos']:>4} renglones  IVA: {ivas}"
+                )
+
+            # Sugerencia concreta, lista para copiar. Se elige, por cada
+            # alícuota, el producto que más se usó con ella.
+            por_tasa: dict[float, dict] = {}
+            for p in datos["productos"].values():
+                for tasa in p["ivas"]:
+                    mejor = por_tasa.get(tasa)
+                    if mejor is None or p["usos"] > mejor["usos"]:
+                        por_tasa[tasa] = p
+
+            if len(por_tasa) == 1:
+                unico = next(iter(por_tasa.values()))
+                click.echo(
+                    f"  -> Una sola alícuota: alcanza con "
+                    f"producto_xubio_id = {unico['ID']}"
+                )
+            else:
+                click.echo("  -> Varias alícuotas: conviene mapear producto por alícuota:")
+                for tasa in sorted(por_tasa):
+                    click.echo(
+                        f"       main.py mapear-producto --cuit {cliente.cuit} "
+                        f"--alicuota {tasa:g} --producto-id {por_tasa[tasa]['ID']}"
+                    )
+
+
 @cli.command("mapear-producto")
 @click.option("--cuit", required=True)
 @click.option(

@@ -59,8 +59,10 @@ def test_una_linea_por_alicuota():
     items = armar_payload(cbte, cliente_xubio_id=1, producto_id=777)["transaccionProductoItems"]
 
     assert len(items) == 2
-    assert {i["iva"] for i in items} == {21.0, 10.5}
+    # 'iva' es el importe en pesos, no el porcentaje.
+    assert {i["iva"] for i in items} == {210.0, 105.0}
     assert sum(i["importe"] for i in items) == 2000.0
+    assert sum(i["iva"] for i in items) == 315.0
 
 
 def test_no_gravado_y_exento_van_como_lineas_aparte():
