@@ -270,3 +270,26 @@ python main.py desactivar --cuit 30701234568
 
 Los inactivos quedan en la base con toda su configuración; volver a activarlos
 es un comando.
+
+## El programa no emite comprobantes
+
+Asociar el servicio **Facturación Electrónica (WSFE)** en ARCA es lo que da
+acceso a WSFEv1, y ese servicio permite tanto consultar como emitir: AFIP no
+ofrece una variante de solo lectura. La garantía tiene que estar del lado del
+código.
+
+De WSFEv1 se invocan únicamente tres métodos, los tres de consulta:
+
+| Método | Para qué |
+|---|---|
+| `FEParamGetPtosVenta` | listar los puntos de venta habilitados |
+| `FECompUltimoAutorizado` | saber hasta qué número llegó cada uno |
+| `FECompConsultar` | leer un comprobante ya emitido |
+
+Nunca se llama `FECAESolicitar`, que es el método que emite. `tests/
+test_solo_lectura_afip.py` lo verifica sobre el código fuente y falla si
+alguien agrega una llamada de escritura, así que la garantía no depende de
+acordarse.
+
+Los comprobantes hechos desde **Comprobantes en Línea** se leen igual por
+WSFEv1: es la misma información, consultada por otra vía.
