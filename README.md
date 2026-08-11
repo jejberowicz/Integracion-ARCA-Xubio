@@ -391,6 +391,24 @@ crontab -e
 0 7 * * * /home/joaco/Carga_Datos_Arca/scripts/sincronizar.sh
 ```
 
+### Cada cuánto se sincroniza cada cliente
+
+El cron corre **todos los días**, pero cada cliente tiene su propio calendario:
+
+```bash
+python main.py calendario --cuit 30712345671 --dia 10   # una vez por mes, el 10
+python main.py calendario --cuit 30712345671            # vuelve a diario
+```
+
+Con un día configurado, se sincroniza a partir de ese día y solo si todavía no
+se hizo en el mes en curso. Si la corrida de ese día se pierde —la máquina
+apagada, un error— se recupera en la siguiente, en vez de esperar al mes que
+viene.
+
+El tope es 28 para que el día exista también en febrero. Para forzar una
+corrida fuera de calendario: `sync --cuit X` (pedir un cliente explícitamente ya
+implica hacerlo ahora) o `sync --igualmente` para todos.
+
 `scripts/sincronizar.sh` usa rutas absolutas (cron corre con un entorno mínimo),
 toma un lock para que dos corridas no se pisen, escribe en
 `data/logs/sync_AAAAMMDD.log` y borra los logs de más de 60 días.

@@ -26,7 +26,7 @@ src/afip/
 src/xubio/client.py       OAuth2, HTTP, maestros, alta de comprobantes
 src/xubio/mapeo.py        traducción AFIP -> Xubio (todo el esquema vive acá)
 src/sync.py               orquestador
-scripts/sincronizar.sh    entrada para cron
+scripts/sincronizar.sh    entrada para cron (diaria; el calendario es por cliente)
 ```
 
 Flujo: ARCA → `ComprobanteNormalizado` → tabla `comprobantes_venta` → Xubio.
@@ -36,10 +36,10 @@ no sabe cuál es.
 **Compras.** Xubio tiene su propio módulo de importación desde Portal IVA, así
 que para muchos clientes las compras no son asunto de este programa: cargarlas
 también las duplicaría. Eso se registra en `clientes_afip.fuente_compras`
-(`portal_iva_xubio` | `mis_comprobantes` | `ninguna`). `analizar-xubio` sugiere
-cuál corresponde mirando si el cliente ya tiene compras recientes cargadas: el
-registro de Xubio no guarda el origen, así que es una inferencia, no una
-certeza. La descarga de compras desde ARCA (solapa "Recibidos" del portal,
+(`portal_iva_xubio` | `mis_comprobantes` | `ninguna`). `analizar-xubio` informa cuántas
+compras hay y hasta cuándo llegan, pero **no deduce el origen**: unas compras
+cargadas ayer pueden venir del módulo de Xubio o de alguien cargándolas a mano,
+y el registro no lo distingue. La decisión la toma quien conoce al cliente. La descarga de compras desde ARCA (solapa "Recibidos" del portal,
 `#btnRecibidos`) todavía **no está implementada**.
 
 Base: SQLite por defecto (`DATABASE_URL` en el `.env`). El modelo también

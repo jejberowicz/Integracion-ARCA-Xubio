@@ -114,6 +114,10 @@ class Cliente(Base):
     #  "cliente_consumidor_final_id": ...}
     config_xubio: Mapped[dict | None] = mapped_column(JSONType, default=dict)
 
+    #: Día del mes en que corresponde sincronizar (1-28). Vacío = todos los días.
+    #: Se limita a 28 para que exista en febrero.
+    dia_sincronizacion: Mapped[int | None] = mapped_column(Integer)
+
     last_sync: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

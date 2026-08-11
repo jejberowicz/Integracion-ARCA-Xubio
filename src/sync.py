@@ -57,6 +57,31 @@ class Resultado:
         return f"{self.cuit} [{self.fuente}]: " + ", ".join(partes)
 
 
+def corresponde_sincronizar(cliente: Cliente, hoy: dt.date | None = None) -> bool:
+    """Si hoy le toca a este cliente según su calendario.
+
+    Sin día configurado, se sincroniza siempre. Con día configurado, se
+    sincroniza a partir de ese día del mes y solo si todavía no se hizo en el
+    mes en curso: así una corrida perdida (la máquina apagada, un error) se
+    recupera al día siguiente en vez de esperar al mes que viene.
+    """
+    if cliente.dia_sincronizacion is None:
+        return True
+
+    hoy = hoy or dt.date.today()
+    dia = max(1, min(int(cliente.dia_sincronizacion), 28))
+    if hoy.day < dia:
+        return False
+
+    objetivo = dt.date(hoy.year, hoy.month, dia)
+    if cliente.last_sync is None:
+        return True
+    ultima = cliente.last_sync
+    if ultima.tzinfo is not None:
+        ultima = ultima.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return ultima.date() < objetivo
+
+
 def clientes_activos(session: Session, cuit: str | None = None) -> list[Cliente]:
     consulta = select(Cliente).where(Cliente.activo.is_(True)).order_by(Cliente.razon_social)
     if cuit:

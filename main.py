@@ -20,7 +20,12 @@ from src.database.models import (
     FuenteVentas,
 )
 from src.security import crypto
-from src.sync import clientes_activos, rango_por_defecto, sincronizar_cliente
+from src.sync import (
+    clientes_activos,
+    corresponde_sincronizar,
+    rango_por_defecto,
+    sincronizar_cliente,
+)
 from src.utils.helpers import (
     cuit_valido,
     es_persona_fisica,
@@ -476,12 +481,18 @@ def listar_clientes() -> None:
 @click.option("--hasta", type=click.DateTime(["%Y-%m-%d"]), help="Fecha final.")
 @click.option("--solo-descargar", is_flag=True, help="Baja de ARCA sin subir a Xubio.")
 @click.option("--solo-subir", is_flag=True, help="Sube lo pendiente sin bajar de ARCA.")
+@click.option(
+    "--igualmente",
+    is_flag=True,
+    help="Sincronizar aunque hoy no le toque según su día del mes.",
+)
 def sync(
     cuit: str | None,
     desde: dt.datetime | None,
     hasta: dt.datetime | None,
     solo_descargar: bool,
     solo_subir: bool,
+    igualmente: bool,
 ) -> None:
     """Corre la sincronización ARCA -> Xubio."""
     if solo_descargar and solo_subir:
@@ -494,6 +505,19 @@ def sync(
             raise click.ClickException(
                 f"No hay clientes activos{f' con CUIT {cuit}' if cuit else ''}."
             )
+
+        # Pedir un cliente explícitamente equivale a decir "hacelo ahora".
+        if not (cuit or igualmente):
+            postergados = [c for c in objetivo if not corresponde_sincronizar(c)]
+            objetivo = [c for c in objetivo if corresponde_sincronizar(c)]
+            for c in postergados:
+                click.echo(
+                    f"  (se saltea {c.razon_social[:34]}: le toca el día "
+                    f"{c.dia_sincronizacion} de cada mes)"
+                )
+            if not objetivo:
+                click.echo("Hoy no le toca a ningún cliente.")
+                return
 
         for cliente in objetivo:
             d, h = rango_por_defecto(cliente)
@@ -1051,66 +1075,59 @@ def analizar_xubio(cuit: str | None) -> None:
                     )
 
 
-#: Si la última compra es más reciente que esto, se asume que algo las carga.
-DIAS_COMPRAS_RECIENTES = 60
+def resumir_compras(compras: dict) -> str:
+    """Describe el estado de las compras sin sacar conclusiones.
 
-
-def sugerir_fuente_compras(compras: dict, hoy=None) -> tuple[str, str]:
-    """Recomienda quién debería cargar las compras, y por qué.
-
-    No se puede saber con certeza de dónde salieron las que ya están: el
-    registro de Xubio no guarda el origen. Pero si llegan hasta hace poco, hay
-    algo cargándolas —casi siempre el módulo de Portal IVA— y este programa no
-    debería meterse, porque las duplicaría.
+    Se intentó deducir el origen mirando si había compras recientes, pero no
+    sirve: unas compras cargadas ayer pueden venir del módulo de Portal IVA de
+    Xubio o de alguien cargándolas a mano, y el registro de Xubio no guarda de
+    dónde salieron. La decisión la tiene que tomar quien conoce al cliente.
     """
-    import datetime as dt
-
-    hoy = hoy or dt.date.today()
-
     if not compras.get("cantidad"):
-        return (
-            FuenteCompras.MIS_COMPROBANTES,
-            "no hay compras cargadas: nadie las está trayendo",
-        )
-
-    try:
-        ultima = dt.date.fromisoformat(compras["hasta"])
-    except (TypeError, ValueError, KeyError):
-        return (
-            FuenteCompras.NINGUNA,
-            "hay compras pero no se pudo leer la fecha de la última: revisalo a mano",
-        )
-
-    dias = (hoy - ultima).days
-    if dias <= DIAS_COMPRAS_RECIENTES:
-        return (
-            FuenteCompras.PORTAL_IVA_XUBIO,
-            f"la última compra es de hace {dias} días: algo las está cargando",
-        )
+        return "no hay compras cargadas"
     return (
-        FuenteCompras.MIS_COMPROBANTES,
-        f"hay compras viejas pero ninguna reciente ({compras['hasta']}): "
-        "parece que se dejaron de cargar",
+        f"{compras['cantidad']} compras cargadas, la última del {compras['hasta']}. "
+        "De dónde salieron no se puede saber desde acá"
     )
 
 
 def _informar_compras(cliente: Cliente, compras: dict) -> None:
-    actual = cliente.fuente_compras
     click.echo(
-        f"  compras en Xubio: {compras['cantidad']}"
-        + (f" ({compras['desde']} a {compras['hasta']})" if compras["cantidad"] else "")
-        + f" | configurado: {actual}"
+        f"  compras: {resumir_compras(compras)} | configurado: {cliente.fuente_compras}"
     )
-
-    sugerida, motivo = sugerir_fuente_compras(compras)
-    if actual == sugerida:
-        click.echo(f"    compras OK ({motivo})")
-    else:
-        click.echo(f"    -> sugerido '{sugerida}': {motivo}")
+    if cliente.fuente_compras == FuenteCompras.NINGUNA:
         click.echo(
-            f"       main.py cambiar-fuente-compras --cuit {cliente.cuit} "
-            f"--fuente {sugerida}"
+            "    -> definí quién las carga: 'portal_iva_xubio' si las trae el módulo\n"
+            "       de Xubio, 'mis_comprobantes' si querés que las baje este programa\n"
+            f"       main.py cambiar-fuente-compras --cuit {cliente.cuit} --fuente ..."
         )
+
+
+@cli.command("calendario")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option(
+    "--dia",
+    type=click.IntRange(1, 28),
+    help="Día del mes en que sincronizar. Sin este parámetro, vuelve a diario.",
+)
+def calendario(cuits: tuple[str, ...], dia: int | None) -> None:
+    """Define cada cuánto se sincroniza un cliente.
+
+    Con --dia se sincroniza una vez por mes, a partir de ese día. Si la corrida
+    de ese día se pierde, se recupera en la siguiente en vez de esperar al mes
+    que viene. Sin --dia, se sincroniza todos los días.
+
+    El tope es 28 para que el día exista también en febrero.
+    """
+    with get_session() as session:
+        for cuit in cuits:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                click.echo(f"  !! no existe {cuit}")
+                continue
+            cliente.dia_sincronizacion = dia
+            cuando = f"el día {dia} de cada mes" if dia else "todos los días"
+            click.echo(f"  {cliente.razon_social[:38]:<38} {cuando}")
 
 
 @cli.command("cambiar-fuente-compras")
@@ -1206,6 +1223,11 @@ def ver_config(cuit: str) -> None:
         click.echo(f"  ventas   : {cliente.fuente_ventas}")
         click.echo(f"  compras  : {cliente.fuente_compras}")
         click.echo(f"  ambiente : {cliente.ambiente}")
+        click.echo(
+            "  cuándo   : "
+            + (f"día {cliente.dia_sincronizacion} de cada mes"
+               if cliente.dia_sincronizacion else "todos los días")
+        )
         click.echo(f"  cert     : {cliente.key_path or '-'} / {cliente.crt_path or '-'}")
         click.echo(f"  xubio id : {cliente.xubio_client_id or '(sin cargar)'}")
         click.echo(f"  secretos : {'cargados' if cliente.xubio_secret_id else 'faltan'}")
