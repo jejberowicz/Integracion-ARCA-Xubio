@@ -431,3 +431,16 @@ que dejar algo pendiente.
 
 Conviene correr `analizar-xubio` antes de la primera sincronización de un
 cliente, para ver desde cuándo tiene comprobantes cargados.
+
+## Chequeo antes de pushear
+
+El repositorio trae un hook que cancela el push si algún commit lleva datos
+reales de clientes: CUIT, razones sociales, credenciales de Xubio, CAEs o IDs de
+comprobantes. Los busca contra la propia base, así que no hay una lista que
+mantener.
+
+```bash
+git config core.hooksPath .githooks     # una vez por clon
+```
+
+Si frena por un falso positivo: `git push --no-verify`.

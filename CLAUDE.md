@@ -219,6 +219,10 @@ python main.py importar-csv --cuit A archivo.csv
   compartirse (`tests/test_diagnostico_no_filtra.py`).
 - Nada de certificados, planillas, bases ni perfiles de navegador en git: ver
   `.gitignore`.
+- Hay un hook que frena el push si detecta datos de clientes en los commits.
+  Se instala con `git config core.hooksPath .githooks` (hace falta una vez por
+  clon). Compara contra los datos de la propia base, así que se mantiene solo a
+  medida que se cargan clientes.
 - **Tampoco datos de clientes en el código.** Razones sociales, CUIT, CAE e
   importes de comprobantes reales están alcanzados por el secreto profesional,
   aunque no sean credenciales. Los ejemplos del README, los tests y este archivo

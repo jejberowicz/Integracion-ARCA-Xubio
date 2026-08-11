@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Frena el push si algún commit lleva datos reales de clientes.
+#
+# Los datos a buscar salen de la propia base: CUIT, razones sociales, usuarios
+# de Clave Fiscal, credenciales de Xubio, CAEs e IDs de comprobantes. Nada de
+# eso tiene por qué estar en el repositorio, aunque no sean contraseñas.
+#
+# Se instala con:
+#   git config core.hooksPath .githooks
+#
+# Para saltearlo en un caso puntual: git push --no-verify
+set -uo pipefail
+
+RAIZ="$(git rev-parse --show-toplevel)"
+PYTHON="$RAIZ/.venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON=python3
+
+PATRONES="$(mktemp)"
+trap 'rm -f "$PATRONES"' EXIT
+
+# Si la base no está disponible, el hook no puede chequear nada: avisa pero no
+# bloquea, para no trabar el trabajo de alguien que clonó el repo.
+if ! "$PYTHON" - <<'PY' > "$PATRONES" 2>/dev/null
+import sys
+sys.path.insert(0, ".")
+from src.database.connection import get_session
+from src.database.models import Cliente, Comprobante
+from src.utils.helpers import formatear_cuit
+
+valores = set()
+with get_session() as s:
+    for c in s.query(Cliente).all():
+        valores |= {c.cuit, formatear_cuit(c.cuit), c.razon_social,
+                    c.clave_fiscal_usuario, formatear_cuit(c.clave_fiscal_usuario),
+                    c.xubio_client_id}
+        for v in (c.config_xubio or {}).values():
+            if isinstance(v, dict):
+                valores |= {str(x) for x in v.values()}
+            elif isinstance(v, list):
+                valores |= {str(x) for x in v}
+            else:
+                valores.add(str(v))
+    for cb in s.query(Comprobante).all():
+        valores |= {cb.doc_nro, cb.receptor_nombre, cb.cae, cb.xubio_id}
+
+# Menos de 6 caracteres no identifica a nadie y llena de falsos positivos.
+for v in sorted(x for x in valores if x and len(str(x)) >= 6):
+    print(v)
+PY
+then
+    echo "pre-push: no se pudo leer la base, se saltea el chequeo de datos de clientes" >&2
+    exit 0
+fi
+
+[ -s "$PATRONES" ] || exit 0
+
+encontrados=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+
+    # Commits que se van a subir. Si la rama es nueva en el remoto, se revisan
+    # todos los que no estén ya en otra rama publicada.
+    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+        rango=$(git rev-list "$local_sha" --not --remotes)
+    else
+        rango=$(git rev-list "$remote_sha".."$local_sha")
+    fi
+    [ -n "$rango" ] || continue
+
+    while IFS= read -r patron; do
+        hallazgo=$(git grep -l -F "$patron" $rango -- 2>/dev/null | head -3)
+        if [ -n "$hallazgo" ]; then
+            [ "$encontrados" -eq 0 ] && echo "" >&2
+            echo "  DATO DE CLIENTE: '$patron'" >&2
+            echo "$hallazgo" | sed 's/^/      /' >&2
+            encontrados=$((encontrados + 1))
+        fi
+    done < "$PATRONES"
+done
+
+if [ "$encontrados" -gt 0 ]; then
+    cat >&2 <<'FIN'
+
+PUSH CANCELADO: hay datos reales de clientes en los commits.
+
+Son datos de un estudio contable, alcanzados por el secreto profesional.
+Reemplazalos por ficticios (con CUIT de dígito verificador válido) y, si ya
+están en commits anteriores, reescribí el historial antes de pushear.
+
+Si estás seguro de que es un falso positivo: git push --no-verify
+FIN
+    exit 1
+fi
+
+exit 0
