@@ -219,3 +219,8 @@ python main.py importar-csv --cuit A archivo.csv
   compartirse (`tests/test_diagnostico_no_filtra.py`).
 - Nada de certificados, planillas, bases ni perfiles de navegador en git: ver
   `.gitignore`.
+- **Tampoco datos de clientes en el código.** Razones sociales, CUIT, CAE e
+  importes de comprobantes reales están alcanzados por el secreto profesional,
+  aunque no sean credenciales. Los ejemplos del README, los tests y este archivo
+  usan datos ficticios con CUIT de dígito verificador válido. Verificar contra
+  producción es necesario, pero lo que se verificó no se copia al repositorio.
