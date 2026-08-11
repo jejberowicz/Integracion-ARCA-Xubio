@@ -33,6 +33,15 @@ Flujo: ARCA → `ComprobanteNormalizado` → tabla `comprobantes_venta` → Xubi
 La fuente se elige por cliente (`clientes_afip.fuente_ventas`); el orquestador
 no sabe cuál es.
 
+**Compras.** Xubio tiene su propio módulo de importación desde Portal IVA, así
+que para muchos clientes las compras no son asunto de este programa: cargarlas
+también las duplicaría. Eso se registra en `clientes_afip.fuente_compras`
+(`portal_iva_xubio` | `mis_comprobantes` | `ninguna`). `analizar-xubio` sugiere
+cuál corresponde mirando si el cliente ya tiene compras recientes cargadas: el
+registro de Xubio no guarda el origen, así que es una inferencia, no una
+certeza. La descarga de compras desde ARCA (solapa "Recibidos" del portal,
+`#btnRecibidos`) todavía **no está implementada**.
+
 Base: SQLite por defecto (`DATABASE_URL` en el `.env`). El modelo también
 soporta Postgres (hay un `docker-compose.yml`), pero hoy se usa SQLite.
 

@@ -29,6 +29,7 @@ COLUMNAS = {
     "razon_social": ("razon_social", "razonsocial", "nombre", "cliente", "empresa"),
     "cuit": ("cuit", "cuil", "documento"),
     "fuente": ("fuente", "fuente_ventas", "origen", "metodo"),
+    "fuente_compras": ("fuente_compras", "compras"),
     "ambiente": ("ambiente",),
     "key_path": ("key_path", "key", "clave_privada"),
     "crt_path": ("crt_path", "crt", "certificado"),

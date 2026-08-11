@@ -2,7 +2,7 @@
 import pytest
 
 from main import _actualizar_cliente, _detectar_corrupcion_excel, _validar_coherencia
-from src.database.models import Cliente, FuenteVentas
+from src.database.models import Cliente, FuenteCompras, FuenteVentas
 from src.security import crypto
 
 
@@ -178,3 +178,61 @@ def test_no_marca_valores_sanos(valor):
 def test_revisa_todas_las_columnas_sensibles():
     assert _detectar_corrupcion_excel({"xubio_secret": "1,23E+20"})
     assert _detectar_corrupcion_excel({"producto_xubio_id": "1,23E+20"})
+
+
+# --- Quién carga las compras ---
+
+def test_sin_compras_las_traemos_nosotros():
+    from main import sugerir_fuente_compras
+
+    fuente, motivo = sugerir_fuente_compras({"cantidad": 0})
+    assert fuente == FuenteCompras.MIS_COMPROBANTES
+    assert "nadie las está trayendo" in motivo
+
+
+def test_compras_recientes_las_carga_xubio():
+    import datetime as dt
+
+    from main import sugerir_fuente_compras
+
+    # Si llegan hasta hace poco, el módulo de Portal IVA las está trayendo y
+    # cargarlas nosotros las duplicaría.
+    fuente, _ = sugerir_fuente_compras(
+        {"cantidad": 500, "hasta": "2026-08-01"}, hoy=dt.date(2026, 8, 11)
+    )
+    assert fuente == FuenteCompras.PORTAL_IVA_XUBIO
+
+
+def test_compras_viejas_quedan_para_nosotros():
+    import datetime as dt
+
+    from main import sugerir_fuente_compras
+
+    fuente, motivo = sugerir_fuente_compras(
+        {"cantidad": 500, "hasta": "2025-01-01"}, hoy=dt.date(2026, 8, 11)
+    )
+    assert fuente == FuenteCompras.MIS_COMPROBANTES
+    assert "dejaron de cargar" in motivo
+
+
+def test_el_limite_son_sesenta_dias():
+    import datetime as dt
+
+    from main import DIAS_COMPRAS_RECIENTES, sugerir_fuente_compras
+
+    hoy = dt.date(2026, 8, 11)
+    justo = hoy - dt.timedelta(days=DIAS_COMPRAS_RECIENTES)
+    pasado = hoy - dt.timedelta(days=DIAS_COMPRAS_RECIENTES + 1)
+
+    assert sugerir_fuente_compras({"cantidad": 1, "hasta": justo.isoformat()}, hoy)[0] \
+        == FuenteCompras.PORTAL_IVA_XUBIO
+    assert sugerir_fuente_compras({"cantidad": 1, "hasta": pasado.isoformat()}, hoy)[0] \
+        == FuenteCompras.MIS_COMPROBANTES
+
+
+def test_fecha_ilegible_no_decide_sola():
+    from main import sugerir_fuente_compras
+
+    fuente, motivo = sugerir_fuente_compras({"cantidad": 10, "hasta": "no-es-fecha"})
+    assert fuente == FuenteCompras.NINGUNA
+    assert "revisalo a mano" in motivo

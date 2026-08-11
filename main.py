@@ -11,7 +11,14 @@ import click
 
 from src import config
 from src.database.connection import crear_tablas, get_session
-from src.database.models import Ambiente, Cliente, Comprobante, EstadoSync, FuenteVentas
+from src.database.models import (
+    Ambiente,
+    Cliente,
+    Comprobante,
+    EstadoSync,
+    FuenteCompras,
+    FuenteVentas,
+)
 from src.security import crypto
 from src.sync import clientes_activos, rango_por_defecto, sincronizar_cliente
 from src.utils.helpers import (
@@ -58,6 +65,7 @@ def _buscar_cliente(session, cuit: str) -> Cliente | None:
 _CAMPOS_ACTUALIZABLES = (
     ("razon_social", "razon_social", None),
     ("fuente", "fuente_ventas", None),
+    ("fuente_compras", "fuente_compras", None),
     ("ambiente", "ambiente", None),
     ("key_path", "key_path", None),
     ("crt_path", "crt_path", None),
@@ -1004,6 +1012,7 @@ def analizar_xubio(cuit: str | None) -> None:
                 click.echo("  Sin comprobantes cargados en Xubio todavía.")
                 continue
 
+            compras = XubioClient(cliente).resumen_compras()
             letras = ", ".join(f"{l} x{n}" for l, n in datos["letras"].most_common())
             click.echo(
                 f"  {datos['comprobantes']} comprobantes "
@@ -1015,6 +1024,8 @@ def analizar_xubio(cuit: str | None) -> None:
                     f"    producto {p['ID']}  {str(p['nombre'])[:32]:<32} "
                     f"{p['usos']:>4} renglones  IVA: {ivas}"
                 )
+
+            _informar_compras(cliente, compras)
 
             # Sugerencia concreta, lista para copiar. Se elige, por cada
             # alícuota, el producto que más se usó con ella.
@@ -1038,6 +1049,88 @@ def analizar_xubio(cuit: str | None) -> None:
                         f"       main.py mapear-producto --cuit {cliente.cuit} "
                         f"--alicuota {tasa:g} --producto-id {por_tasa[tasa]['ID']}"
                     )
+
+
+#: Si la última compra es más reciente que esto, se asume que algo las carga.
+DIAS_COMPRAS_RECIENTES = 60
+
+
+def sugerir_fuente_compras(compras: dict, hoy=None) -> tuple[str, str]:
+    """Recomienda quién debería cargar las compras, y por qué.
+
+    No se puede saber con certeza de dónde salieron las que ya están: el
+    registro de Xubio no guarda el origen. Pero si llegan hasta hace poco, hay
+    algo cargándolas —casi siempre el módulo de Portal IVA— y este programa no
+    debería meterse, porque las duplicaría.
+    """
+    import datetime as dt
+
+    hoy = hoy or dt.date.today()
+
+    if not compras.get("cantidad"):
+        return (
+            FuenteCompras.MIS_COMPROBANTES,
+            "no hay compras cargadas: nadie las está trayendo",
+        )
+
+    try:
+        ultima = dt.date.fromisoformat(compras["hasta"])
+    except (TypeError, ValueError, KeyError):
+        return (
+            FuenteCompras.NINGUNA,
+            "hay compras pero no se pudo leer la fecha de la última: revisalo a mano",
+        )
+
+    dias = (hoy - ultima).days
+    if dias <= DIAS_COMPRAS_RECIENTES:
+        return (
+            FuenteCompras.PORTAL_IVA_XUBIO,
+            f"la última compra es de hace {dias} días: algo las está cargando",
+        )
+    return (
+        FuenteCompras.MIS_COMPROBANTES,
+        f"hay compras viejas pero ninguna reciente ({compras['hasta']}): "
+        "parece que se dejaron de cargar",
+    )
+
+
+def _informar_compras(cliente: Cliente, compras: dict) -> None:
+    actual = cliente.fuente_compras
+    click.echo(
+        f"  compras en Xubio: {compras['cantidad']}"
+        + (f" ({compras['desde']} a {compras['hasta']})" if compras["cantidad"] else "")
+        + f" | configurado: {actual}"
+    )
+
+    sugerida, motivo = sugerir_fuente_compras(compras)
+    if actual == sugerida:
+        click.echo(f"    compras OK ({motivo})")
+    else:
+        click.echo(f"    -> sugerido '{sugerida}': {motivo}")
+        click.echo(
+            f"       main.py cambiar-fuente-compras --cuit {cliente.cuit} "
+            f"--fuente {sugerida}"
+        )
+
+
+@cli.command("cambiar-fuente-compras")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option("--fuente", type=click.Choice(FuenteCompras.TODAS), required=True)
+def cambiar_fuente_compras(cuits: tuple[str, ...], fuente: str) -> None:
+    """Define quién carga las compras de un cliente.
+
+    'portal_iva_xubio' significa que las trae el módulo de Xubio y este programa
+    no las toca: cargarlas también las duplicaría.
+    """
+    with get_session() as session:
+        for cuit in cuits:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                click.echo(f"  !! no existe {cuit}")
+                continue
+            anterior = cliente.fuente_compras
+            cliente.fuente_compras = fuente
+            click.echo(f"  {cliente.razon_social[:38]:<38} {anterior} -> {fuente}")
 
 
 @cli.command("mapear-punto-venta")
@@ -1110,7 +1203,8 @@ def ver_config(cuit: str) -> None:
             raise click.ClickException(f"No existe el cliente {cuit}")
 
         click.echo(f"{cliente.razon_social} ({formatear_cuit(cliente.cuit)})")
-        click.echo(f"  fuente   : {cliente.fuente_ventas}")
+        click.echo(f"  ventas   : {cliente.fuente_ventas}")
+        click.echo(f"  compras  : {cliente.fuente_compras}")
         click.echo(f"  ambiente : {cliente.ambiente}")
         click.echo(f"  cert     : {cliente.key_path or '-'} / {cliente.crt_path or '-'}")
         click.echo(f"  xubio id : {cliente.xubio_client_id or '(sin cargar)'}")
