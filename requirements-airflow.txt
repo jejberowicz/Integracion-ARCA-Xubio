@@ -1,0 +1,13 @@
+# Airflow va en su PROPIO virtualenv (.venv-airflow), aparte del proyecto.
+#
+# No es manía: Airflow 2.x pide SQLAlchemy < 2.0 y acá se usa 2.0.36, así que
+# en un mismo entorno uno de los dos queda roto. El DAG no importa nada del
+# proyecto; lo llama por subprocess contra .venv/bin/python.
+#
+# Instalación (la hace scripts/airflow.sh instalar):
+#   pip install -r requirements-airflow.txt \
+#     --constraint https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.12.txt
+#
+# Las constraints son obligatorias: sin ellas pip resuelve versiones que no se
+# llevan entre sí y la instalación queda inutilizable.
+apache-airflow==2.10.5

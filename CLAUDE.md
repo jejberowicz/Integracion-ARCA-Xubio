@@ -1,7 +1,7 @@
 # Carga_Datos_Arca — estado del proyecto
 
 Sincroniza las ventas de ARCA (ex AFIP) hacia Xubio para las ~20 empresas de un
-estudio contable. Corre desatendido por cron.
+estudio contable. Corre desatendido, orquestado por Airflow.
 
 Español rioplatense en código, comentarios, commits y CLI.
 
@@ -26,7 +26,8 @@ src/afip/
 src/xubio/client.py       OAuth2, HTTP, maestros, alta de comprobantes
 src/xubio/mapeo.py        traducción AFIP -> Xubio (todo el esquema vive acá)
 src/sync.py               orquestador
-scripts/sincronizar.sh    entrada para cron (diaria; el calendario es por cliente)
+airflow/dags/             DAG diario, una rama por cliente
+scripts/airflow.sh        instalar / iniciar / probar Airflow
 ```
 
 Flujo: ARCA → `ComprobanteNormalizado` → tabla `comprobantes_venta` → Xubio.
@@ -138,8 +139,8 @@ acá parece raro, es porque la realidad es rara.
 | Parseo del CSV con alícuotas reales | Funciona |
 | Alta de comprobante en Xubio | **Verificado con uno real** (`transaccionid 9000001`) |
 | Protección contra duplicados en Xubio | Funciona (17 detectados como ya cargados) |
-| Corrida por cron | Lista, sin usar todavía |
-| 138 tests | Pasan, sin tocar la red |
+| DAG de Airflow (`arca_xubio_sincronizacion`) | Parsea y corre; falta dejarlo como servicio |
+| 154 tests | Pasan, sin tocar la red (6 del DAG, solo con Airflow instalado) |
 
 ### Clientes
 
@@ -161,6 +162,27 @@ representa a otras tres que **no están** en la planilla. Conviene correr
 > secreto profesional.
 
 ---
+
+## Orquestación
+
+El cron (`scripts/sincronizar.sh`) fue reemplazado por Airflow. El pipeline no
+cambió: el DAG llama a `main.py` por subprocess, igual que hacía el shell.
+
+- **Airflow vive en `.venv-airflow`, aparte del `.venv` del proyecto.** Airflow
+  2.x pide SQLAlchemy < 2.0 y acá se usa 2.0.36. Por eso el DAG **no importa
+  nada de `src/`**: si aparece un `from src...` en `airflow/dags/`, está mal.
+- Lo único que cruza esa frontera es el **código de salida** de `main.py sync`:
+  0 bien, 1 falla transitoria (se reintenta), 2 requiere que alguien resuelva
+  algo a mano (no se reintenta). Está en `_codigo_de_salida`, con tests.
+- **La descarga se reintenta; la subida a Xubio no** (`retries=0`). Un POST
+  fallido no dice si el comprobante quedó creado igual.
+- El calendario por cliente sigue en la base (`dia_sincronizacion`), no en el
+  `schedule`. El DAG corre a diario y `clientes-hoy` decide las ramas.
+- `max_active_runs=1` reemplaza al `flock`; `max_active_tasks=1` evita dos
+  navegadores de Playwright a la vez y dos escritores sobre SQLite.
+- `tests/test_dag_airflow.py` se saltea solo si se corre con el intérprete del
+  proyecto. Para correrlo de verdad:
+  `.venv-airflow/bin/python -m pytest tests/test_dag_airflow.py`.
 
 ## Trampas conocidas
 
@@ -207,6 +229,7 @@ python main.py scrapear --cuit A --explorar     # vuelca el DOM del portal
 # Operación
 python main.py sync [--cuit A] [--solo-descargar|--solo-subir]
 python main.py pendientes [--cuit A]
+python main.py clientes-hoy [--json]            # a quién le toca hoy (lo usa el DAG)
 python main.py scrapear --cuit A --desde 2026-07-01 --hasta 2026-07-31
 python main.py importar-csv --cuit A archivo.csv
 ```

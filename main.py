@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import re
 import sys
@@ -553,8 +554,66 @@ def sync(
         for r in atencion:
             click.echo(f"  {r.cuit}")
 
-    if any(not r.ok for r in resultados):
-        sys.exit(1)
+    sys.exit(_codigo_de_salida(resultados))
+
+
+#: El orquestador (Airflow) lee el código de salida para decidir qué hacer:
+#: 1 se reintenta, 2 no, porque hace falta que alguien vaya a resolver algo.
+SALIDA_OK = 0
+SALIDA_FALLA = 1
+SALIDA_REQUIERE_ATENCION = 2
+
+
+def _codigo_de_salida(resultados: list) -> int:
+    """Traduce el resumen de una corrida a un código de salida.
+
+    Una falla transitoria (la red, un 500 de Xubio) pesa más que una que
+    requiere atención: si hay aunque sea una que se puede recuperar sola,
+    conviene que el orquestador reintente.
+    """
+    fallados = [r for r in resultados if not r.ok]
+    if not fallados:
+        return SALIDA_OK
+    if all(r.requiere_atencion for r in fallados):
+        return SALIDA_REQUIERE_ATENCION
+    return SALIDA_FALLA
+
+
+@cli.command("clientes-hoy")
+@click.option("--json", "como_json", is_flag=True, help="Salida JSON, para el DAG de Airflow.")
+@click.option(
+    "--igualmente",
+    is_flag=True,
+    help="Listar todos los activos, sin mirar el calendario de cada uno.",
+)
+def clientes_hoy(como_json: bool, igualmente: bool) -> None:
+    """Lista los clientes que hoy corresponde sincronizar.
+
+    Es lo que separa "todos los activos" de "los que hoy les toca": el
+    calendario vive en la base, un cliente por vez, y no en el cron ni en el
+    schedule del DAG. Con --json devuelve una lista de CUIT en una sola línea,
+    que es como la consume Airflow para armar una tarea por cliente.
+    """
+    with get_session() as session:
+        clientes = clientes_activos(session)
+        if not igualmente:
+            clientes = [c for c in clientes if corresponde_sincronizar(c)]
+
+        if como_json:
+            # Una sola línea y nada más: del otro lado esto se parsea.
+            click.echo(json.dumps([c.cuit for c in clientes]))
+            return
+
+        if not clientes:
+            click.echo("Hoy no le toca a ningún cliente.")
+            return
+        for c in clientes:
+            cuando = (
+                f"día {c.dia_sincronizacion} de cada mes"
+                if c.dia_sincronizacion
+                else "todos los días"
+            )
+            click.echo(f"{c.cuit}  {c.razon_social[:35]:<35} {cuando}")
 
 
 @cli.command("scrapear")
