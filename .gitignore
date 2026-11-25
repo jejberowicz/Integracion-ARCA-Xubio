@@ -46,3 +46,14 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# Airflow: su virtualenv y todo lo que genera al correr (base, logs, config
+# con la clave de Fernet del webserver, contraseña del admin)
+.venv-airflow/
+airflow/airflow.cfg
+airflow/airflow.db*
+airflow/logs/
+airflow/webserver_config.py
+airflow/*_password.txt
+airflow/*passwords.json
+airflow/*.pid

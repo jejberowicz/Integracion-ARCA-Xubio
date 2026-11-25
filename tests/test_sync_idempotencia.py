@@ -159,3 +159,54 @@ def test_ante_la_duda_no_sube(session, cliente, guardado, monkeypatch):
     assert resultado.sin_certeza == 1
     assert guardado.estado_sync == EstadoSync.ERROR
     assert "No se pudo confirmar" in guardado.error_sync
+
+
+# --- Calendario por cliente ---
+
+from src.sync import corresponde_sincronizar  # noqa: E402
+
+
+def con_calendario(dia=None, ultima=None):
+    return Cliente(
+        cuit="30712345671", razon_social="ACME SA",
+        fuente_ventas=FuenteVentas.WSFE, key_path="a.key", crt_path="a.crt",
+        dia_sincronizacion=dia, last_sync=ultima,
+    )
+
+
+def test_sin_dia_configurado_se_sincroniza_siempre():
+    assert corresponde_sincronizar(con_calendario(), dt.date(2026, 8, 3))
+    assert corresponde_sincronizar(con_calendario(), dt.date(2026, 8, 25))
+
+
+def test_antes_del_dia_no_le_toca():
+    assert not corresponde_sincronizar(con_calendario(dia=10), dt.date(2026, 8, 9))
+
+
+def test_el_dia_justo_le_toca():
+    assert corresponde_sincronizar(con_calendario(dia=10), dt.date(2026, 8, 10))
+
+
+def test_no_se_repite_dentro_del_mismo_mes():
+    cliente = con_calendario(dia=10, ultima=dt.datetime(2026, 8, 10, 7, 0))
+    assert not corresponde_sincronizar(cliente, dt.date(2026, 8, 11))
+    assert not corresponde_sincronizar(cliente, dt.date(2026, 8, 28))
+
+
+def test_una_corrida_perdida_se_recupera_al_dia_siguiente():
+    # La máquina estuvo apagada el 10: el 11 tiene que correr igual, en vez de
+    # esperar al mes que viene.
+    cliente = con_calendario(dia=10, ultima=dt.datetime(2026, 7, 10, 7, 0))
+    assert corresponde_sincronizar(cliente, dt.date(2026, 8, 11))
+
+
+def test_al_mes_siguiente_vuelve_a_tocar():
+    cliente = con_calendario(dia=10, ultima=dt.datetime(2026, 8, 10, 7, 0))
+    assert corresponde_sincronizar(cliente, dt.date(2026, 9, 10))
+
+
+def test_last_sync_con_zona_horaria_no_rompe():
+    cliente = con_calendario(
+        dia=10, ultima=dt.datetime(2026, 8, 10, 7, 0, tzinfo=dt.timezone.utc)
+    )
+    assert not corresponde_sincronizar(cliente, dt.date(2026, 8, 11))

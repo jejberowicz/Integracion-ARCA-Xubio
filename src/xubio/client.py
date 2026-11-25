@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 # operar en producción: Xubio cambió los nombres entre versiones.
 RUTA_COMPROBANTE_VENTA = "/comprobanteVentaBean"
 RUTA_CLIENTES = "/clienteBean"
+RUTA_COMPROBANTE_COMPRA = "/comprobanteCompraBean"
 RUTA_PUNTOS_VENTA = "/puntoVentaBean"
 # Xubio no expone un recurso de productos: el catálogo se deduce de los
 # comprobantes ya cargados (ver XubioClient.productos_conocidos).
@@ -295,6 +296,20 @@ class XubioClient:
                 ficha["ivas"].add(tasa)
 
         return resumen
+
+    def resumen_compras(self) -> dict:
+        """Qué compras tiene cargadas la empresa en Xubio.
+
+        Sirve para decidir si alguien más ya las está cargando —el módulo de
+        Portal IVA de Xubio, típicamente— y este programa no tiene que tocarlas.
+        """
+        listado = self.get(RUTA_COMPROBANTE_COMPRA) or []
+        fechas = sorted(v["fecha"] for v in listado if v.get("fecha"))
+        return {
+            "cantidad": len(listado),
+            "desde": fechas[0] if fechas else None,
+            "hasta": fechas[-1] if fechas else None,
+        }
 
     def punto_venta_id(self, pto_vta: int) -> Any | None:
         """Traduce el número de punto de venta de AFIP al ID interno de Xubio."""

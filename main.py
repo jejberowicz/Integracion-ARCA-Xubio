@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import re
 import sys
@@ -11,9 +12,21 @@ import click
 
 from src import config
 from src.database.connection import crear_tablas, get_session
-from src.database.models import Ambiente, Cliente, Comprobante, EstadoSync, FuenteVentas
+from src.database.models import (
+    Ambiente,
+    Cliente,
+    Comprobante,
+    EstadoSync,
+    FuenteCompras,
+    FuenteVentas,
+)
 from src.security import crypto
-from src.sync import clientes_activos, rango_por_defecto, sincronizar_cliente
+from src.sync import (
+    clientes_activos,
+    corresponde_sincronizar,
+    rango_por_defecto,
+    sincronizar_cliente,
+)
 from src.utils.helpers import (
     cuit_valido,
     es_persona_fisica,
@@ -58,6 +71,7 @@ def _buscar_cliente(session, cuit: str) -> Cliente | None:
 _CAMPOS_ACTUALIZABLES = (
     ("razon_social", "razon_social", None),
     ("fuente", "fuente_ventas", None),
+    ("fuente_compras", "fuente_compras", None),
     ("ambiente", "ambiente", None),
     ("key_path", "key_path", None),
     ("crt_path", "crt_path", None),
@@ -468,12 +482,18 @@ def listar_clientes() -> None:
 @click.option("--hasta", type=click.DateTime(["%Y-%m-%d"]), help="Fecha final.")
 @click.option("--solo-descargar", is_flag=True, help="Baja de ARCA sin subir a Xubio.")
 @click.option("--solo-subir", is_flag=True, help="Sube lo pendiente sin bajar de ARCA.")
+@click.option(
+    "--igualmente",
+    is_flag=True,
+    help="Sincronizar aunque hoy no le toque según su día del mes.",
+)
 def sync(
     cuit: str | None,
     desde: dt.datetime | None,
     hasta: dt.datetime | None,
     solo_descargar: bool,
     solo_subir: bool,
+    igualmente: bool,
 ) -> None:
     """Corre la sincronización ARCA -> Xubio."""
     if solo_descargar and solo_subir:
@@ -486,6 +506,19 @@ def sync(
             raise click.ClickException(
                 f"No hay clientes activos{f' con CUIT {cuit}' if cuit else ''}."
             )
+
+        # Pedir un cliente explícitamente equivale a decir "hacelo ahora".
+        if not (cuit or igualmente):
+            postergados = [c for c in objetivo if not corresponde_sincronizar(c)]
+            objetivo = [c for c in objetivo if corresponde_sincronizar(c)]
+            for c in postergados:
+                click.echo(
+                    f"  (se saltea {c.razon_social[:34]}: le toca el día "
+                    f"{c.dia_sincronizacion} de cada mes)"
+                )
+            if not objetivo:
+                click.echo("Hoy no le toca a ningún cliente.")
+                return
 
         for cliente in objetivo:
             d, h = rango_por_defecto(cliente)
@@ -521,8 +554,66 @@ def sync(
         for r in atencion:
             click.echo(f"  {r.cuit}")
 
-    if any(not r.ok for r in resultados):
-        sys.exit(1)
+    sys.exit(_codigo_de_salida(resultados))
+
+
+#: El orquestador (Airflow) lee el código de salida para decidir qué hacer:
+#: 1 se reintenta, 2 no, porque hace falta que alguien vaya a resolver algo.
+SALIDA_OK = 0
+SALIDA_FALLA = 1
+SALIDA_REQUIERE_ATENCION = 2
+
+
+def _codigo_de_salida(resultados: list) -> int:
+    """Traduce el resumen de una corrida a un código de salida.
+
+    Una falla transitoria (la red, un 500 de Xubio) pesa más que una que
+    requiere atención: si hay aunque sea una que se puede recuperar sola,
+    conviene que el orquestador reintente.
+    """
+    fallados = [r for r in resultados if not r.ok]
+    if not fallados:
+        return SALIDA_OK
+    if all(r.requiere_atencion for r in fallados):
+        return SALIDA_REQUIERE_ATENCION
+    return SALIDA_FALLA
+
+
+@cli.command("clientes-hoy")
+@click.option("--json", "como_json", is_flag=True, help="Salida JSON, para el DAG de Airflow.")
+@click.option(
+    "--igualmente",
+    is_flag=True,
+    help="Listar todos los activos, sin mirar el calendario de cada uno.",
+)
+def clientes_hoy(como_json: bool, igualmente: bool) -> None:
+    """Lista los clientes que hoy corresponde sincronizar.
+
+    Es lo que separa "todos los activos" de "los que hoy les toca": el
+    calendario vive en la base, un cliente por vez, y no en el cron ni en el
+    schedule del DAG. Con --json devuelve una lista de CUIT en una sola línea,
+    que es como la consume Airflow para armar una tarea por cliente.
+    """
+    with get_session() as session:
+        clientes = clientes_activos(session)
+        if not igualmente:
+            clientes = [c for c in clientes if corresponde_sincronizar(c)]
+
+        if como_json:
+            # Una sola línea y nada más: del otro lado esto se parsea.
+            click.echo(json.dumps([c.cuit for c in clientes]))
+            return
+
+        if not clientes:
+            click.echo("Hoy no le toca a ningún cliente.")
+            return
+        for c in clientes:
+            cuando = (
+                f"día {c.dia_sincronizacion} de cada mes"
+                if c.dia_sincronizacion
+                else "todos los días"
+            )
+            click.echo(f"{c.cuit}  {c.razon_social[:35]:<35} {cuando}")
 
 
 @cli.command("scrapear")
@@ -1004,6 +1095,7 @@ def analizar_xubio(cuit: str | None) -> None:
                 click.echo("  Sin comprobantes cargados en Xubio todavía.")
                 continue
 
+            compras = XubioClient(cliente).resumen_compras()
             letras = ", ".join(f"{l} x{n}" for l, n in datos["letras"].most_common())
             click.echo(
                 f"  {datos['comprobantes']} comprobantes "
@@ -1015,6 +1107,8 @@ def analizar_xubio(cuit: str | None) -> None:
                     f"    producto {p['ID']}  {str(p['nombre'])[:32]:<32} "
                     f"{p['usos']:>4} renglones  IVA: {ivas}"
                 )
+
+            _informar_compras(cliente, compras)
 
             # Sugerencia concreta, lista para copiar. Se elige, por cada
             # alícuota, el producto que más se usó con ella.
@@ -1038,6 +1132,81 @@ def analizar_xubio(cuit: str | None) -> None:
                         f"       main.py mapear-producto --cuit {cliente.cuit} "
                         f"--alicuota {tasa:g} --producto-id {por_tasa[tasa]['ID']}"
                     )
+
+
+def resumir_compras(compras: dict) -> str:
+    """Describe el estado de las compras sin sacar conclusiones.
+
+    Se intentó deducir el origen mirando si había compras recientes, pero no
+    sirve: unas compras cargadas ayer pueden venir del módulo de Portal IVA de
+    Xubio o de alguien cargándolas a mano, y el registro de Xubio no guarda de
+    dónde salieron. La decisión la tiene que tomar quien conoce al cliente.
+    """
+    if not compras.get("cantidad"):
+        return "no hay compras cargadas"
+    return (
+        f"{compras['cantidad']} compras cargadas, la última del {compras['hasta']}. "
+        "De dónde salieron no se puede saber desde acá"
+    )
+
+
+def _informar_compras(cliente: Cliente, compras: dict) -> None:
+    click.echo(
+        f"  compras: {resumir_compras(compras)} | configurado: {cliente.fuente_compras}"
+    )
+    if cliente.fuente_compras == FuenteCompras.NINGUNA:
+        click.echo(
+            "    -> definí quién las carga: 'portal_iva_xubio' si las trae el módulo\n"
+            "       de Xubio, 'mis_comprobantes' si querés que las baje este programa\n"
+            f"       main.py cambiar-fuente-compras --cuit {cliente.cuit} --fuente ..."
+        )
+
+
+@cli.command("calendario")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option(
+    "--dia",
+    type=click.IntRange(1, 28),
+    help="Día del mes en que sincronizar. Sin este parámetro, vuelve a diario.",
+)
+def calendario(cuits: tuple[str, ...], dia: int | None) -> None:
+    """Define cada cuánto se sincroniza un cliente.
+
+    Con --dia se sincroniza una vez por mes, a partir de ese día. Si la corrida
+    de ese día se pierde, se recupera en la siguiente en vez de esperar al mes
+    que viene. Sin --dia, se sincroniza todos los días.
+
+    El tope es 28 para que el día exista también en febrero.
+    """
+    with get_session() as session:
+        for cuit in cuits:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                click.echo(f"  !! no existe {cuit}")
+                continue
+            cliente.dia_sincronizacion = dia
+            cuando = f"el día {dia} de cada mes" if dia else "todos los días"
+            click.echo(f"  {cliente.razon_social[:38]:<38} {cuando}")
+
+
+@cli.command("cambiar-fuente-compras")
+@click.option("--cuit", "cuits", multiple=True, required=True, help="Repetible.")
+@click.option("--fuente", type=click.Choice(FuenteCompras.TODAS), required=True)
+def cambiar_fuente_compras(cuits: tuple[str, ...], fuente: str) -> None:
+    """Define quién carga las compras de un cliente.
+
+    'portal_iva_xubio' significa que las trae el módulo de Xubio y este programa
+    no las toca: cargarlas también las duplicaría.
+    """
+    with get_session() as session:
+        for cuit in cuits:
+            cliente = _buscar_cliente(session, cuit)
+            if cliente is None:
+                click.echo(f"  !! no existe {cuit}")
+                continue
+            anterior = cliente.fuente_compras
+            cliente.fuente_compras = fuente
+            click.echo(f"  {cliente.razon_social[:38]:<38} {anterior} -> {fuente}")
 
 
 @cli.command("mapear-punto-venta")
@@ -1110,8 +1279,14 @@ def ver_config(cuit: str) -> None:
             raise click.ClickException(f"No existe el cliente {cuit}")
 
         click.echo(f"{cliente.razon_social} ({formatear_cuit(cliente.cuit)})")
-        click.echo(f"  fuente   : {cliente.fuente_ventas}")
+        click.echo(f"  ventas   : {cliente.fuente_ventas}")
+        click.echo(f"  compras  : {cliente.fuente_compras}")
         click.echo(f"  ambiente : {cliente.ambiente}")
+        click.echo(
+            "  cuándo   : "
+            + (f"día {cliente.dia_sincronizacion} de cada mes"
+               if cliente.dia_sincronizacion else "todos los días")
+        )
         click.echo(f"  cert     : {cliente.key_path or '-'} / {cliente.crt_path or '-'}")
         click.echo(f"  xubio id : {cliente.xubio_client_id or '(sin cargar)'}")
         click.echo(f"  secretos : {'cargados' if cliente.xubio_secret_id else 'faltan'}")

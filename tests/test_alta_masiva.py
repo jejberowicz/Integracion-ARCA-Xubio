@@ -2,7 +2,7 @@
 import pytest
 
 from main import _actualizar_cliente, _detectar_corrupcion_excel, _validar_coherencia
-from src.database.models import Cliente, FuenteVentas
+from src.database.models import Cliente, FuenteCompras, FuenteVentas
 from src.security import crypto
 
 
@@ -178,3 +178,21 @@ def test_no_marca_valores_sanos(valor):
 def test_revisa_todas_las_columnas_sensibles():
     assert _detectar_corrupcion_excel({"xubio_secret": "1,23E+20"})
     assert _detectar_corrupcion_excel({"producto_xubio_id": "1,23E+20"})
+
+
+# --- Estado de las compras ---
+
+def test_resume_sin_compras():
+    from main import resumir_compras
+
+    assert "no hay compras" in resumir_compras({"cantidad": 0})
+
+
+def test_no_saca_conclusiones_sobre_el_origen():
+    from main import resumir_compras
+
+    # Unas compras cargadas ayer pueden ser del módulo de Xubio o cargadas a
+    # mano: el registro no lo dice y el programa no debe adivinarlo.
+    texto = resumir_compras({"cantidad": 500, "hasta": "2026-08-10"})
+    assert "500 compras" in texto
+    assert "no se puede saber" in texto

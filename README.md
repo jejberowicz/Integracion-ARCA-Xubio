@@ -214,6 +214,8 @@ src/xubio/
   client.py                  OAuth2 + HTTP + alta de comprobantes
   mapeo.py                   traducción AFIP -> Xubio
 src/sync.py                  orquestador
+airflow/dags/                DAG de Airflow (reemplaza al cron)
+scripts/airflow.sh           instalar, iniciar y probar Airflow
 ```
 
 Para agregar una fuente nueva alcanza con heredar de `FuenteVentas`, decorarla
@@ -226,7 +228,15 @@ pytest -q
 ```
 
 Cubren la inferencia de alícuotas, el parseo del CSV, el mapeo a Xubio, la firma
-CMS del WSAA y la idempotencia. Nada de eso toca la red.
+CMS del WSAA, los códigos de salida que lee Airflow y la idempotencia. Nada de
+eso toca la red.
+
+Los del DAG necesitan Airflow, que vive en otro virtualenv, así que se saltean
+con `pytest` a secas:
+
+```bash
+.venv-airflow/bin/python -m pytest tests/test_dag_airflow.py
+```
 
 ## Pendiente de verificar contra las APIs reales
 
@@ -361,7 +371,7 @@ acordarse.
 **WSFEv1 no lee los comprobantes hechos desde Comprobantes en Línea.** Ver la
 sección siguiente: es una limitación de AFIP, no del programa.
 
-## Corrida automatizada (cron)
+## Corrida automatizada (Airflow)
 
 El objetivo es que no haya nada que tipear ni que ejecutar a mano.
 
@@ -383,17 +393,96 @@ También se pueden cargar en lote desde la planilla, con las columnas
 Tener veinte Claves Fiscales en un `.xlsx` en claro es un riesgo a considerar:
 en la base quedan cifradas, en la planilla no.
 
-Y después:
+Y después, el orquestador:
 
 ```bash
-crontab -e
-# Todos los días a las 7
-0 7 * * * /home/joaco/Carga_Datos_Arca/scripts/sincronizar.sh
+scripts/airflow.sh instalar   # crea .venv-airflow y la base de Airflow
+scripts/airflow.sh iniciar    # scheduler + web en http://localhost:8080
 ```
 
-`scripts/sincronizar.sh` usa rutas absolutas (cron corre con un entorno mínimo),
-toma un lock para que dos corridas no se pisen, escribe en
-`data/logs/sync_AAAAMMDD.log` y borra los logs de más de 60 días.
+El DAG `arca_xubio_sincronizacion` corre todos los días a las 7 (hora de Buenos
+Aires) y arma **una rama por cliente**:
+
+```
+clientes_de_hoy ──┬── cliente[30712345671] ── descargar ── subir ──┐
+                  ├── cliente[27123456780] ── descargar ── subir ──┼── resumen
+                  └── cliente[20123456786] ── descargar ── subir ──┘
+```
+
+### Por qué Airflow y no el cron
+
+El script de cron corría todo en un proceso: un cliente con la credencial
+vencida se llevaba puestos a los demás, y el log era un archivo de texto que
+había que ir a buscar a mano.
+
+| | cron (`scripts/sincronizar.sh`) | Airflow |
+|---|---|---|
+| Aislamiento | un proceso para los 20 | una rama por cliente; el que falla no frena al resto |
+| Reintentos | ninguno, hasta mañana | la descarga sola, a los 15 minutos, dos veces |
+| Subida a Xubio | igual que todo lo demás | `retries=0` explícito: un POST fallido no se reintenta |
+| "Esto lo tiene que ver alguien" | una línea en el log | tarea en rojo que no reintenta, con el motivo |
+| Una corrida a la vez | `flock` a mano | `max_active_runs=1` |
+| Historial | `data/logs/sync_AAAAMMDD.log`, borrado a los 60 días | por tarea y por corrida, en la web |
+| Correr de nuevo un día puntual | editar el comando y rezar | *Clear* sobre esa tarea, o disparar con otros parámetros |
+
+Lo que **no** cambió: el pipeline. Airflow no hace nada que la CLI no hiciera;
+llama a `main.py` igual que lo hacía el shell.
+
+### Airflow va en su propio virtualenv
+
+`.venv-airflow`, aparte de `.venv`. Airflow 2.x pide SQLAlchemy < 2.0 y el
+proyecto usa 2.0.36: en un mismo entorno uno de los dos queda roto. Por eso el
+DAG **no importa nada del proyecto**: lo invoca por subprocess contra
+`.venv/bin/python`, y lo único que cruza la frontera es el código de salida.
+
+| Código de salida de `main.py sync` | Qué hace Airflow |
+|---|---|
+| 0 | tarea en verde |
+| 1 (falla transitoria: la red, un 500 de Xubio) | reintenta |
+| 2 (requiere atención: captcha, 2FA, un trámite en ARCA) | falla y **no** reintenta |
+
+Nadie va a resolver un captcha porque el scheduler pruebe de nuevo en quince
+minutos: esa distinción es toda la diferencia entre un reintento útil y ruido.
+
+### Cada cuánto se sincroniza cada cliente
+
+El DAG corre **todos los días**, pero cada cliente tiene su propio calendario,
+que vive en la base y no en el `schedule`:
+
+```bash
+python main.py calendario --cuit 30712345671 --dia 10   # una vez por mes, el 10
+python main.py calendario --cuit 30712345671            # vuelve a diario
+python main.py clientes-hoy                             # a quién le toca hoy
+```
+
+Con un día configurado, se sincroniza a partir de ese día y solo si todavía no
+se hizo en el mes en curso. Si la corrida de ese día se pierde —la máquina
+apagada, un error— se recupera en la siguiente, en vez de esperar al mes que
+viene. La primera tarea del DAG (`clientes_de_hoy`) es exactamente esa pregunta,
+y de su respuesta salen las ramas.
+
+El tope es 28 para que el día exista también en febrero. Para forzar una corrida
+fuera de calendario, desde la web: *Trigger DAG w/ config*, con los parámetros
+`cuits` (lista de CUIT), `igualmente`, `desde` y `hasta`. Desde la terminal sigue
+andando `python main.py sync --cuit X`.
+
+### Probar el DAG sin levantar nada
+
+```bash
+scripts/airflow.sh probar          # corre el DAG entero en este proceso
+.venv-airflow/bin/python -m pytest tests/test_dag_airflow.py
+```
+
+`probar` toca ARCA y Xubio de verdad: es la corrida real, no un simulacro. Los
+tests, en cambio, solo verifican que el DAG parsee y conserve su forma (que la
+subida no reintente, que haya una sola corrida a la vez); se saltean solos si se
+corren con el intérprete del proyecto, que no tiene Airflow.
+
+### Que arranque solo
+
+`airflow standalone` es para desarrollo: se cae con la terminal. Para dejarlo
+andando, un servicio de systemd por proceso (`scheduler` y `api-server`/
+`webserver`), o `restart: always` en un compose. Todavía no está armado.
 
 ### Qué esperar en el resumen
 

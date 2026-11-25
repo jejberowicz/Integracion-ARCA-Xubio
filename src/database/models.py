@@ -41,6 +41,24 @@ class FuenteVentas:
     TODAS = (WSFE, MIS_COMPROBANTES)
 
 
+class FuenteCompras:
+    """Quién carga las compras de un cliente.
+
+    Xubio tiene su propio módulo de importación desde Portal IVA. Para los
+    clientes que lo usan, este programa **no** tiene que tocar las compras: si
+    las cargara, quedarían duplicadas.
+    """
+
+    #: Las carga Xubio con su módulo de Portal IVA. Nosotros no hacemos nada.
+    PORTAL_IVA_XUBIO = "portal_iva_xubio"
+    #: Las bajamos nosotros del portal de ARCA (solapa "Recibidos").
+    MIS_COMPROBANTES = "mis_comprobantes"
+    #: Nadie las carga automáticamente todavía.
+    NINGUNA = "ninguna"
+
+    TODAS = (PORTAL_IVA_XUBIO, MIS_COMPROBANTES, NINGUNA)
+
+
 class EstadoSync:
     PENDIENTE = "pendiente"
     SUBIDO = "subido"
@@ -71,6 +89,10 @@ class Cliente(Base):
     fuente_ventas: Mapped[str] = mapped_column(
         String(30), nullable=False, default=FuenteVentas.WSFE
     )
+    #: Las compras pueden no ser asunto nuestro: ver FuenteCompras.
+    fuente_compras: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=FuenteCompras.NINGUNA
+    )
     ambiente: Mapped[str] = mapped_column(
         String(20), nullable=False, default=Ambiente.PRODUCCION
     )
@@ -91,6 +113,10 @@ class Cliente(Base):
     # {"producto_default_id": ..., "punto_venta_ids": {"1": ...},
     #  "cliente_consumidor_final_id": ...}
     config_xubio: Mapped[dict | None] = mapped_column(JSONType, default=dict)
+
+    #: Día del mes en que corresponde sincronizar (1-28). Vacío = todos los días.
+    #: Se limita a 28 para que exista en febrero.
+    dia_sincronizacion: Mapped[int | None] = mapped_column(Integer)
 
     last_sync: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
